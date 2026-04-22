@@ -82,6 +82,7 @@ const Room = () => {
 
   // Suppress local event re-broadcast when applying remote events
   const applyingRemoteRef = useRef(false);
+  const syncLeaderRef = useRef<string | null>(null);
   const sourceRef = useRef<Source>(source);
   sourceRef.current = source;
   const playingRef = useRef(playing);
@@ -111,6 +112,7 @@ const Room = () => {
         break;
       }
       case "source": {
+        syncLeaderRef.current = e.from;
         const cur = sourceRef.current;
         // Only adopt YouTube remotely (file blobs are tab-local)
         if (e.source.type === "youtube") {
@@ -128,46 +130,51 @@ const Room = () => {
         break;
       }
       case "play": {
+        syncLeaderRef.current = e.from;
         applyingRemoteRef.current = true;
         seekInternal(e.t);
         playInternal();
         setPlaying(true);
-        window.setTimeout(() => { applyingRemoteRef.current = false; }, 250);
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         break;
       }
       case "pause": {
+        syncLeaderRef.current = e.from;
         applyingRemoteRef.current = true;
         seekInternal(e.t);
         pauseInternal();
         setPlaying(false);
-        window.setTimeout(() => { applyingRemoteRef.current = false; }, 250);
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         break;
       }
       case "seek": {
+        syncLeaderRef.current = e.from;
         applyingRemoteRef.current = true;
         seekInternal(e.t);
         setProgress(e.t);
-        window.setTimeout(() => { applyingRemoteRef.current = false; }, 250);
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         break;
       }
       case "tick": {
-        // Soft drift correction: if difference > 1.5s, snap
+        syncLeaderRef.current = e.from;
+        // Soft drift correction: avoid jitter from tiny player differences.
         const cur = currentTimeInternal();
-        if (Math.abs(cur - e.t) > 1.5) {
+        if (Math.abs(cur - e.t) > 4) {
           applyingRemoteRef.current = true;
           seekInternal(e.t);
           setProgress(e.t);
-          window.setTimeout(() => { applyingRemoteRef.current = false; }, 200);
+          window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         }
         break;
       }
       case "state-snapshot": {
         if (sourceRef.current.type === "none" && e.source.type === "youtube") {
+          syncLeaderRef.current = e.from;
           applyingRemoteRef.current = true;
           setSource({ type: "youtube", videoId: e.source.videoId });
           setProgress(e.t);
           setPlaying(e.playing);
-          window.setTimeout(() => { applyingRemoteRef.current = false; }, 300);
+          window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         }
         break;
       }
@@ -189,6 +196,10 @@ const Room = () => {
   useEffect(() => {
     sendRef.current = {
       snapshot: () => {
+        if (syncLeaderRef.current && syncLeaderRef.current !== me.id) {
+          return;
+        }
+
         const src = sourceRef.current;
         const syncSrc: SyncSource =
           src.type === "youtube" ? { type: "youtube", videoId: src.videoId }
@@ -210,14 +221,14 @@ const Room = () => {
     send({ kind: "state-request" } as Omit<SyncEvent, "from" | "at">);
     const presenceId = window.setInterval(() => {
       send({ kind: "presence", user: me.name, avatar: me.color } as Omit<SyncEvent, "from" | "at">);
-      // Prune dead peers (no presence in 12s)
+      // Mobile browsers can throttle timers, so keep presence tolerant.
       setPeers((p) => {
-        const cutoff = Date.now() - 12000;
+        const cutoff = Date.now() - 45000;
         const next: typeof p = {};
         for (const [k, v] of Object.entries(p)) if (v.lastSeen > cutoff) next[k] = v;
         return next;
       });
-    }, 4000);
+    }, 10000);
     const onUnload = () => send({ kind: "leave" } as Omit<SyncEvent, "from" | "at">);
     window.addEventListener("beforeunload", onUnload);
     return () => {
@@ -261,10 +272,11 @@ const Room = () => {
     if (source.type === "none") return;
     const id = window.setInterval(() => {
       if (!playingRef.current) return;
+      if (syncLeaderRef.current && syncLeaderRef.current !== me.id) return;
       send({ kind: "tick", t: currentTimeInternal(), playing: true } as Omit<SyncEvent, "from" | "at">);
-    }, 2500);
+    }, 5000);
     return () => window.clearInterval(id);
-  }, [source, send]);
+  }, [source, send, me.id]);
 
   // ---- Internal player helpers (no broadcast) ----
   const currentTimeInternal = (): number => {
@@ -303,6 +315,7 @@ const Room = () => {
       return;
     }
     setSource({ type: "youtube", videoId: vid });
+    syncLeaderRef.current = me.id;
     setYtUrl("");
     setPlaying(false);
     setProgress(0);
@@ -318,6 +331,7 @@ const Room = () => {
     }
     const url = URL.createObjectURL(file);
     setSource({ type: "file", url, name: file.name });
+    syncLeaderRef.current = me.id;
     setPlaying(false);
     announce(`${me.name} загрузил(а) файл «${file.name}»`);
     send({ kind: "source", source: { type: "file", name: file.name } } as Omit<SyncEvent, "from" | "at">);
@@ -326,6 +340,7 @@ const Room = () => {
 
   const togglePlay = () => {
     const next = !playing;
+    syncLeaderRef.current = me.id;
     if (next) playInternal(); else pauseInternal();
     setPlaying(next);
     send({
@@ -335,6 +350,7 @@ const Room = () => {
   };
 
   const seekTo = (val: number) => {
+    syncLeaderRef.current = me.id;
     seekInternal(val);
     setProgress(val);
     send({ kind: "seek", t: val } as Omit<SyncEvent, "from" | "at">);
@@ -366,11 +382,13 @@ const Room = () => {
   const handleNativePlay = () => {
     setPlaying(true);
     if (applyingRemoteRef.current) return;
+    syncLeaderRef.current = me.id;
     send({ kind: "play", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
   };
   const handleNativePause = () => {
     setPlaying(false);
     if (applyingRemoteRef.current) return;
+    syncLeaderRef.current = me.id;
     send({ kind: "pause", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
   };
 

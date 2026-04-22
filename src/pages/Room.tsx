@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import YouTube, { YouTubePlayer } from "react-youtube";
 import {
   Film, Users, Copy, Check, Send, Youtube as YoutubeIcon, Upload, Link as LinkIcon,
-  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings, Crown, Activity
+  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings, Crown, Activity, UserX, ShieldCheck
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -136,6 +136,7 @@ const Room = () => {
   const [peers, setPeers] = useState<Record<string, { user: string; avatar: string; lastSeen: number }>>({});
   const [syncLeaderId, setSyncLeaderId] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [adminId, setAdminId] = useState<string | null>(null);
 
   // chat
   const [messages, setMessages] = useState<Message[]>([
@@ -218,6 +219,15 @@ const Room = () => {
           [e.from]: { user: e.user, avatar: e.avatar, lastSeen: e.at },
         }));
         addSystemMessage(oldName === e.user ? `${e.user} обновил(а) профиль` : `${oldName} теперь ${e.user}`);
+        break;
+      }
+      case "room-meta": {
+        setAdminId(e.adminId);
+        break;
+      }
+      case "kicked": {
+        toast.error("Админ исключил вас из комнаты");
+        navigate("/");
         break;
       }
       case "leave": {
@@ -623,6 +633,12 @@ const Room = () => {
     toast.success("Имя обновлено");
   };
 
+  const kickPeer = (id: string) => {
+    const name = peers[id]?.user ?? "участника";
+    send({ kind: "kick", target: id } as Omit<SyncEvent, "from" | "at">);
+    announce(`${me.name} исключил(а) ${name} из комнаты`);
+  };
+
   const copyCode = async () => {
     await navigator.clipboard.writeText(window.location.href);
     setCopied(true);
@@ -640,6 +656,7 @@ const Room = () => {
   const syncLabel = syncStatus
     ? `${Math.abs(syncStatus.lastDrift) > 4 ? "Коррекция" : "Синхронизация"} ±${Math.abs(syncStatus.lastDrift).toFixed(1)} c`
     : "Ожидание синка";
+  const isAdmin = adminId === me.id;
 
   return (
     <div className="relative min-h-screen bg-background text-foreground">
@@ -834,8 +851,18 @@ const Room = () => {
                 </span>
               </div>
               <div className="flex flex-wrap gap-2">
-                <ViewerChip name={`${me.name} (вы)`} color={me.color} self leader={syncLeaderId === me.id} />
-                {peerList.map((v) => <ViewerChip key={v.id} name={v.user} color={v.avatar} leader={syncLeaderId === v.id} />)}
+                <ViewerChip name={`${me.name} (вы)`} color={me.color} self leader={syncLeaderId === me.id} admin={adminId === me.id} />
+                {peerList.map((v) => (
+                  <ViewerChip
+                    key={v.id}
+                    name={v.user}
+                    color={v.avatar}
+                    leader={syncLeaderId === v.id}
+                    admin={adminId === v.id}
+                    canKick={isAdmin}
+                    onKick={() => kickPeer(v.id)}
+                  />
+                ))}
                 {peerList.length === 0 && (
                   <p className="text-xs text-muted-foreground">
                     Откройте эту страницу в другой вкладке — зритель появится здесь автоматически.
@@ -960,11 +987,28 @@ const EmptyPlayer = () => (
   </div>
 );
 
-const ViewerChip = ({ name, color, self, leader }: { name: string; color: string; self?: boolean; leader?: boolean }) => (
+const ViewerChip = ({
+  name,
+  color,
+  self,
+  leader,
+  admin,
+  canKick,
+  onKick,
+}: {
+  name: string;
+  color: string;
+  self?: boolean;
+  leader?: boolean;
+  admin?: boolean;
+  canKick?: boolean;
+  onKick?: () => void;
+}) => (
   <div className={cn(
     "flex max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-sm",
     self ? "border-primary/50 bg-primary/10" : "border-border/60 bg-muted/40",
-    leader && "border-amber-300/60 bg-amber-300/10"
+    leader && "border-amber-300/60 bg-amber-300/10",
+    admin && !leader && "border-emerald-300/50 bg-emerald-300/10"
   )}>
     <span
       className="flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold text-background"
@@ -973,11 +1017,27 @@ const ViewerChip = ({ name, color, self, leader }: { name: string; color: string
       {name[0]}
     </span>
     <span className="truncate text-foreground/90">{name}</span>
+    {admin && (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-300/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+        <ShieldCheck className="h-3 w-3" />
+        Админ
+      </span>
+    )}
     {leader && (
       <span className="inline-flex items-center gap-1 rounded-full bg-amber-300/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
         <Crown className="h-3 w-3" />
         Ведущий
       </span>
+    )}
+    {canKick && onKick && (
+      <button
+        type="button"
+        onClick={onKick}
+        className="ml-1 inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive"
+        aria-label={`Исключить ${name}`}
+      >
+        <UserX className="h-3.5 w-3.5" />
+      </button>
     )}
   </div>
 );

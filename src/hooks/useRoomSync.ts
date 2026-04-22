@@ -19,6 +19,9 @@ export type SyncEvent =
   | { kind: "chat"; id: string; user: string; avatar: string; text: string; at: number; from: string }
   | { kind: "presence"; user: string; avatar: string; at: number; from: string }
   | { kind: "profile"; user: string; avatar: string; at: number; from: string }
+  | { kind: "room-meta"; adminId: string; at: number; from: string }
+  | { kind: "kick"; target: string; at: number; from: string }
+  | { kind: "kicked"; by: string; at: number; from: string }
   | { kind: "leave"; from: string; at: number }
   | { kind: "hello"; from: string; user: string; avatar: string; at: number }
   | { kind: "state-request"; from: string; at: number }

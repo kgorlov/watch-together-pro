@@ -116,6 +116,9 @@ wss.on("connection", (socket, request) => {
     if (event.kind === "hello" || event.kind === "presence") {
       rememberUser(room, userId, event);
       sendKnownRoomState(socket, room, userId);
+    } else if (event.kind === "kick") {
+      handleKick(roomCode, room, userId, event);
+      return;
     } else if (event.kind === "leave") {
       scheduleUserLeave(roomCode, room, userId);
       return;
@@ -148,6 +151,7 @@ function getRoom(roomCode) {
   const room = {
     clients: new Set(),
     users: new Map(),
+    adminId: "",
     state: {
       source: { type: "none" },
       t: 0,
@@ -172,9 +176,18 @@ function rememberUser(room, userId, event) {
     lastSeen: event.at,
     leaveTimer: null,
   });
+
+  if (!room.adminId) {
+    room.adminId = userId;
+    broadcastRoomMeta(room);
+  }
 }
 
 function sendKnownRoomState(socket, room, selfId) {
+  if (room.adminId) {
+    send(socket, { kind: "room-meta", adminId: room.adminId, from: "server", at: Date.now() });
+  }
+
   for (const [userId, user] of room.users) {
     if (userId === selfId) continue;
     send(socket, {
@@ -195,6 +208,33 @@ function sendKnownRoomState(socket, room, selfId) {
       from: room.state.from || "server",
       at: Date.now(),
     });
+  }
+}
+
+function handleKick(roomCode, room, adminId, event) {
+  if (room.adminId !== adminId) {
+    return;
+  }
+
+  const target = normalizeUserId(event.target);
+  if (!target || target === adminId || !room.users.has(target)) {
+    return;
+  }
+
+  for (const peer of Array.from(room.clients)) {
+    if (peer.userId === target) {
+      send(peer.socket, { kind: "kicked", by: adminId, from: "server", at: Date.now() });
+      peer.socket.close(4001, "kicked");
+      room.clients.delete(peer);
+    }
+  }
+
+  room.users.delete(target);
+  broadcast(room, null, { kind: "leave", from: target, at: Date.now() });
+  broadcastRoomMeta(room);
+
+  if (room.clients.size === 0 && room.users.size === 0) {
+    rooms.delete(roomCode);
   }
 }
 
@@ -265,11 +305,20 @@ function scheduleUserLeave(roomCode, room, userId) {
     }
 
     room.users.delete(userId);
+    if (room.adminId === userId) {
+      room.adminId = room.users.keys().next().value || "";
+      broadcastRoomMeta(room);
+    }
     broadcast(room, null, { kind: "leave", from: userId, at: Date.now() });
     if (room.clients.size === 0 && room.users.size === 0) {
       rooms.delete(roomCode);
     }
   }, LEAVE_GRACE_MS);
+}
+
+function broadcastRoomMeta(room) {
+  if (!room.adminId) return;
+  broadcast(room, null, { kind: "room-meta", adminId: room.adminId, from: "server", at: Date.now() });
 }
 
 function broadcast(room, sender, event) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface SyncTimelineProps {
@@ -32,6 +32,7 @@ export const SyncTimeline = ({
   className,
 }: SyncTimelineProps) => {
   const trackRef = useRef<HTMLDivElement>(null);
+  const syncTimerRef = useRef<number | undefined>(undefined);
   const [hoverX, setHoverX] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -48,11 +49,11 @@ export const SyncTimeline = ({
     return (x / r.width) * safeDuration;
   };
 
-  const triggerSyncPulse = () => {
+  const triggerSyncPulse = useCallback(() => {
     setSyncing(true);
-    window.clearTimeout((triggerSyncPulse as any)._t);
-    (triggerSyncPulse as any)._t = window.setTimeout(() => setSyncing(false), 900);
-  };
+    window.clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = window.setTimeout(() => setSyncing(false), 900);
+  }, []);
 
   const handlePointerDown = (e: React.PointerEvent) => {
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
@@ -86,7 +87,7 @@ export const SyncTimeline = ({
     // Detect a jump that wasn't a tiny normal tick (~0.5s @ 500ms interval)
     if (delta > 1.5) triggerSyncPulse();
     lastReportedRef.current = current;
-  }, [current]);
+  }, [current, triggerSyncPulse]);
 
   const hoverTime = hoverX !== null && trackRef.current
     ? (hoverX / trackRef.current.getBoundingClientRect().width) * safeDuration

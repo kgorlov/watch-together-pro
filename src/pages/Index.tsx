@@ -47,7 +47,7 @@ const Index = () => {
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-primary shadow-glow">
             <Film className="h-5 w-5 text-primary-foreground" />
           </div>
-          <span className="font-display text-xl font-bold tracking-tight">Lumen</span>
+          <span className="font-display text-xl font-bold tracking-tight">Люмен</span>
         </div>
         <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
           <a href="#features" className="transition-colors hover:text-foreground">Возможности</a>
@@ -193,7 +193,7 @@ const Index = () => {
         </section>
 
         <footer id="faq" className="border-t border-border/50 py-10 text-center text-sm text-muted-foreground">
-          © {new Date().getFullYear()} Lumen — совместный кинопросмотр. Курсовой проект.
+          © {new Date().getFullYear()} Люмен - совместный кинопросмотр в реальном времени. Все права защищены.
         </footer>
       </main>
     </div>

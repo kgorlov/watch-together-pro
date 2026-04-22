@@ -192,8 +192,8 @@ const Room = () => {
         const src = sourceRef.current;
         const syncSrc: SyncSource =
           src.type === "youtube" ? { type: "youtube", videoId: src.videoId }
-          : src.type === "file" ? { type: "file", name: src.name }
-          : { type: "none" };
+            : src.type === "file" ? { type: "file", name: src.name }
+              : { type: "none" };
         send({
           kind: "state-snapshot",
           source: syncSrc,
@@ -251,7 +251,7 @@ const Room = () => {
       try {
         setProgress(await p.getCurrentTime());
         setDuration(await p.getDuration());
-      } catch {/* noop */}
+      } catch {/* noop */ }
     }, 500);
     return () => clearInterval(id);
   }, [source]);
@@ -285,7 +285,7 @@ const Room = () => {
   };
   const playInternal = () => {
     if (sourceRef.current.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.playVideo();
-    else if (sourceRef.current.type === "file" && videoRef.current) videoRef.current.play().catch(() => {});
+    else if (sourceRef.current.type === "file" && videoRef.current) videoRef.current.play().catch(() => { });
   };
   const pauseInternal = () => {
     if (sourceRef.current.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.pauseVideo();
@@ -352,7 +352,11 @@ const Room = () => {
     const next = !muted;
     setMuted(next);
     if (source.type === "youtube" && ytPlayerRef.current) {
-      next ? ytPlayerRef.current.mute() : ytPlayerRef.current.unMute();
+      if (next) {
+        ytPlayerRef.current.mute();
+      } else {
+        ytPlayerRef.current.unMute();
+      }
     } else if (videoRef.current) {
       videoRef.current.muted = next;
     }
@@ -410,7 +414,7 @@ const Room = () => {
               <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-primary shadow-glow">
                 <Film className="h-5 w-5 text-primary-foreground" />
               </div>
-              <span className="font-display text-lg font-bold">Lumen</span>
+              <span className="font-display text-lg font-bold">Люмен</span>
             </div>
           </div>
 

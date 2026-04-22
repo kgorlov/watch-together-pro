@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import YouTube, { YouTubePlayer } from "react-youtube";
 import {
   Film, Users, Copy, Check, Send, Youtube as YoutubeIcon, Upload, Link as LinkIcon,
-  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings
+  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings, Crown, Activity
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,6 +53,12 @@ const extractYoutubeId = (input: string): string | null => {
     if (m) return m[1];
   }
   return null;
+};
+
+type SyncStatus = {
+  lastSyncAt: number;
+  lastRemoteTime: number;
+  lastDrift: number;
 };
 
 const getBackendBaseUrl = () => {
@@ -128,6 +134,8 @@ const Room = () => {
 
   // Live presence of other tabs in this room
   const [peers, setPeers] = useState<Record<string, { user: string; avatar: string; lastSeen: number }>>({});
+  const [syncLeaderId, setSyncLeaderId] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
   // chat
   const [messages, setMessages] = useState<Message[]>([
@@ -158,27 +166,67 @@ const Room = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
+  const addSystemMessage = useCallback((text: string) => {
+    setMessages((m) => [...m, sysMsg(text)]);
+  }, []);
+
+  const getPeerName = useCallback((id: string) => {
+    if (id === me.id) return "вы";
+    return peers[id]?.user ?? "Гость";
+  }, [me.id, peers]);
+
+  const markSyncLeader = useCallback((id: string) => {
+    syncLeaderRef.current = id;
+    setSyncLeaderId(id);
+  }, []);
+
+  const markLocalLeader = useCallback(() => {
+    markSyncLeader(me.id);
+  }, [markSyncLeader, me.id]);
+
+  const updateSyncStatus = useCallback((remoteTime: number) => {
+    setSyncStatus({
+      lastSyncAt: Date.now(),
+      lastRemoteTime: remoteTime,
+      lastDrift: currentTimeInternal() - remoteTime,
+    });
+  }, []);
+
   // ---- Sync setup ----
   const onSyncEvent = useCallback((e: SyncEvent) => {
     switch (e.kind) {
       case "hello":
       case "presence": {
+        const existing = peers[e.from];
         setPeers((p) => ({
           ...p,
           [e.from]: { user: e.user, avatar: e.avatar, lastSeen: e.at },
         }));
         if (e.kind === "hello") {
+          if (!existing) {
+            addSystemMessage(`${e.user} подключился(ась)`);
+          }
           // greet new peer with current state
           window.setTimeout(() => sendRef.current?.snapshot(), 50);
         }
         break;
       }
+      case "profile": {
+        const oldName = peers[e.from]?.user ?? "Гость";
+        setPeers((p) => ({
+          ...p,
+          [e.from]: { user: e.user, avatar: e.avatar, lastSeen: e.at },
+        }));
+        addSystemMessage(oldName === e.user ? `${e.user} обновил(а) профиль` : `${oldName} теперь ${e.user}`);
+        break;
+      }
       case "leave": {
+        addSystemMessage(`${peers[e.from]?.user ?? "Гость"} отключился(ась)`);
         setPeers((p) => { const n = { ...p }; delete n[e.from]; return n; });
         break;
       }
       case "source": {
-        syncLeaderRef.current = e.from;
+        markSyncLeader(e.from);
         const cur = sourceRef.current;
         if (e.source.type === "youtube") {
           if (cur.type !== "youtube" || cur.videoId !== e.source.videoId) {
@@ -186,7 +234,7 @@ const Room = () => {
             setSource({ type: "youtube", videoId: e.source.videoId });
             setProgress(0);
             setPlaying(false);
-            setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} включил(а) видео с YouTube`)]);
+            addSystemMessage(`${getPeerName(e.from)} включил(а) видео с YouTube`);
           }
         } else if (e.source.type === "file") {
           if (cur.type !== "file" || cur.url !== e.source.url) {
@@ -194,28 +242,35 @@ const Room = () => {
             setSource({ type: "file", url: resolveMediaUrl(e.source.url), name: e.source.name });
             setProgress(0);
             setPlaying(false);
-            setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} загрузил(а) файл «${e.source.name}»`)]);
+            addSystemMessage(`${getPeerName(e.from)} загрузил(а) файл «${e.source.name}»`);
           }
         }
         break;
       }
       case "play": {
-        syncLeaderRef.current = e.from;
+        markSyncLeader(e.from);
+        updateSyncStatus(e.t);
+        addSystemMessage(`${getPeerName(e.from)} запустил(а) просмотр`);
         applyRemotePlayback(e.t, true);
         break;
       }
       case "pause": {
-        syncLeaderRef.current = e.from;
+        markSyncLeader(e.from);
+        updateSyncStatus(e.t);
+        addSystemMessage(`${getPeerName(e.from)} поставил(а) паузу`);
         applyRemotePlayback(e.t, false);
         break;
       }
       case "seek": {
-        syncLeaderRef.current = e.from;
+        markSyncLeader(e.from);
+        updateSyncStatus(e.t);
+        addSystemMessage(`${getPeerName(e.from)} перемотал(а) видео`);
         applyRemotePlayback(e.t, playingRef.current);
         break;
       }
       case "tick": {
-        syncLeaderRef.current = e.from;
+        markSyncLeader(e.from);
+        updateSyncStatus(e.t);
         // Soft drift correction: avoid jitter from tiny player differences.
         const cur = currentTimeInternal();
         if (Math.abs(cur - e.t) > 4) {
@@ -225,7 +280,8 @@ const Room = () => {
       }
       case "state-snapshot": {
         if (e.source.type === "youtube") {
-          syncLeaderRef.current = e.from;
+          markSyncLeader(e.from);
+          updateSyncStatus(e.t);
           applyingRemoteRef.current = true;
           const cur = sourceRef.current;
           if (cur.type !== "youtube" || cur.videoId !== e.source.videoId) {
@@ -234,7 +290,8 @@ const Room = () => {
           applyRemotePlayback(e.t, e.playing);
           window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         } else if (e.source.type === "file") {
-          syncLeaderRef.current = e.from;
+          markSyncLeader(e.from);
+          updateSyncStatus(e.t);
           applyingRemoteRef.current = true;
           const cur = sourceRef.current;
           const url = resolveMediaUrl(e.source.url);
@@ -413,7 +470,7 @@ const Room = () => {
       return;
     }
     setSource({ type: "youtube", videoId: vid });
-    syncLeaderRef.current = me.id;
+    markLocalLeader();
     setYtUrl("");
     setPlaying(false);
     setProgress(0);
@@ -456,7 +513,7 @@ const Room = () => {
       const uploaded = await response.json() as { name: string; url: string };
       const url = resolveMediaUrl(uploaded.url);
       setSource({ type: "file", url, name: uploaded.name || file.name });
-      syncLeaderRef.current = me.id;
+      markLocalLeader();
       setPlaying(false);
       setProgress(0);
       announce(`${me.name} загрузил(а) файл «${uploaded.name || file.name}»`);
@@ -474,9 +531,10 @@ const Room = () => {
 
   const togglePlay = () => {
     const next = !playing;
-    syncLeaderRef.current = me.id;
+    markLocalLeader();
     if (next) playInternal(); else pauseInternal();
     setPlaying(next);
+    announce(next ? `${me.name} запустил(а) просмотр` : `${me.name} поставил(а) паузу`);
     send({
       kind: next ? "play" : "pause",
       t: currentTimeInternal(),
@@ -484,9 +542,10 @@ const Room = () => {
   };
 
   const seekTo = (val: number) => {
-    syncLeaderRef.current = me.id;
+    markLocalLeader();
     seekInternal(val);
     setProgress(val);
+    announce(`${me.name} перемотал(а) видео`);
     send({ kind: "seek", t: val } as Omit<SyncEvent, "from" | "at">);
   };
 
@@ -516,13 +575,13 @@ const Room = () => {
   const handleNativePlay = () => {
     setPlaying(true);
     if (applyingRemoteRef.current) return;
-    syncLeaderRef.current = me.id;
+    markLocalLeader();
     send({ kind: "play", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
   };
   const handleNativePause = () => {
     setPlaying(false);
     if (applyingRemoteRef.current) return;
-    syncLeaderRef.current = me.id;
+    markLocalLeader();
     send({ kind: "pause", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
   };
 
@@ -557,7 +616,9 @@ const Room = () => {
       // Ignore storage failures in private/incognito modes.
     }
 
+    announce(`Имя изменено на ${next.name}`);
     send({ kind: "presence", user: next.name, avatar: next.color } as Omit<SyncEvent, "from" | "at">);
+    send({ kind: "profile", user: next.name, avatar: next.color } as Omit<SyncEvent, "from" | "at">);
     setProfileOpen(false);
     toast.success("Имя обновлено");
   };
@@ -569,15 +630,23 @@ const Room = () => {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const peerList = Object.values(peers);
+  const peerList = Object.entries(peers).map(([id, peer]) => ({ id, ...peer }));
   const onlineCount = peerList.length + 1;
+  const leaderName = syncLeaderId === me.id
+    ? "вы"
+    : syncLeaderId
+      ? peers[syncLeaderId]?.user ?? "гость"
+      : "не выбран";
+  const syncLabel = syncStatus
+    ? `${Math.abs(syncStatus.lastDrift) > 4 ? "Коррекция" : "Синхронизация"} ±${Math.abs(syncStatus.lastDrift).toFixed(1)} c`
+    : "Ожидание синка";
 
   return (
     <div className="relative min-h-screen bg-background text-foreground">
       <div className="pointer-events-none absolute inset-0 bg-hero opacity-60" aria-hidden />
       <div className="pointer-events-none absolute -top-40 left-1/3 h-[500px] w-[500px] rounded-full bg-primary/15 blur-[140px]" aria-hidden />
 
-      <div className="relative z-10 mx-auto flex max-w-[1500px] flex-col gap-6 px-4 py-5 lg:px-8">
+      <div className="relative z-10 mx-auto flex max-w-[1500px] flex-col gap-4 px-3 py-4 sm:gap-6 sm:px-4 sm:py-5 lg:px-8">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="icon" onClick={() => navigate("/")} className="rounded-xl">
@@ -599,10 +668,10 @@ const Room = () => {
             </div>
             <button
               onClick={copyCode}
-              className="group flex items-center gap-2 rounded-full glass px-4 py-2 text-sm transition-colors hover:border-primary/50"
+              className="group flex max-w-[calc(100vw-1.5rem)] items-center gap-2 rounded-full glass px-3 py-2 text-sm transition-colors hover:border-primary/50 sm:px-4"
             >
               <span className="text-muted-foreground">Код:</span>
-              <span className="font-mono font-semibold tracking-[0.25em]">{code}</span>
+              <span className="max-w-[44vw] truncate font-mono font-semibold tracking-[0.2em] sm:max-w-none sm:tracking-[0.25em]">{code}</span>
               {copied
                 ? <Check className="h-4 w-4 text-emerald-400" />
                 : <Copy className="h-4 w-4 text-muted-foreground transition-colors group-hover:text-primary-glow" />}
@@ -610,9 +679,9 @@ const Room = () => {
           </div>
         </header>
 
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="grid gap-4 sm:gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="space-y-5">
-            <div className="relative overflow-hidden rounded-3xl border border-border/60 bg-black shadow-elevated">
+            <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-black shadow-elevated sm:rounded-3xl">
               <div className="aspect-video w-full">
                 {source.type === "none" && <EmptyPlayer />}
 
@@ -651,7 +720,7 @@ const Room = () => {
               </div>
 
               {source.type !== "none" && (
-                <div className="border-t border-white/5 bg-gradient-to-b from-black/0 to-black/60 p-4">
+                <div className="border-t border-white/5 bg-gradient-to-b from-black/0 to-black/60 p-3 sm:p-4">
                   <SyncTimeline
                     current={progress}
                     duration={duration}
@@ -660,8 +729,8 @@ const Room = () => {
                     className="mb-4"
                   />
 
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Button onClick={togglePlay} size="icon" className="h-11 w-11 rounded-full bg-gradient-primary shadow-glow">
                         {playing ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}
                       </Button>
@@ -678,10 +747,19 @@ const Room = () => {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                      <span className="hidden items-center gap-1.5 rounded-full bg-emerald-400/10 px-3 py-1 text-emerald-300 sm:inline-flex">
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        Синхронизировано · {onlineCount} зрителей
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground sm:justify-end">
+                      <span className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full px-3 py-1",
+                        syncStatus && Math.abs(syncStatus.lastDrift) > 4
+                          ? "bg-amber-400/10 text-amber-300"
+                          : "bg-emerald-400/10 text-emerald-300"
+                      )}>
+                        <Activity className="h-3.5 w-3.5" />
+                        {syncLabel}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-primary-glow">
+                        <Crown className="h-3.5 w-3.5" />
+                        Ведущий: {leaderName}
                       </span>
                       <Button variant="ghost" size="icon" className="rounded-full">
                         <Maximize2 className="h-4 w-4" />
@@ -692,7 +770,7 @@ const Room = () => {
               )}
             </div>
 
-            <div className="rounded-3xl border border-border/60 bg-gradient-card p-5 shadow-soft">
+            <div className="rounded-2xl border border-border/60 bg-gradient-card p-4 shadow-soft sm:rounded-3xl sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h2 className="font-display text-lg font-semibold">Источник видео</h2>
@@ -718,18 +796,18 @@ const Room = () => {
                 <TabsContent value="youtube" className="mt-4">
                   <form
                     onSubmit={(e) => { e.preventDefault(); handleSetYoutube(); }}
-                    className="flex h-12 items-stretch overflow-hidden rounded-xl bg-input"
+                    className="flex flex-col gap-2 rounded-xl sm:h-12 sm:flex-row sm:items-stretch sm:overflow-hidden sm:bg-input"
                   >
-                    <div className="flex items-center pl-4 text-muted-foreground">
+                    <div className="hidden items-center pl-4 text-muted-foreground sm:flex">
                       <LinkIcon className="h-4 w-4" />
                     </div>
                     <Input
                       value={ytUrl}
                       onChange={(e) => setYtUrl(e.target.value)}
                       placeholder="Вставьте ссылку YouTube или ID видео"
-                      className="h-full flex-1 border-0 bg-transparent focus-visible:ring-0"
+                      className="h-12 flex-1 border-border/60 bg-input sm:h-full sm:border-0 sm:bg-transparent sm:focus-visible:ring-0"
                     />
-                    <Button type="submit" className="h-full rounded-none bg-gradient-primary px-5">
+                    <Button type="submit" className="h-12 rounded-xl bg-gradient-primary px-5 sm:h-full sm:rounded-none">
                       Загрузить
                     </Button>
                   </form>
@@ -746,7 +824,7 @@ const Room = () => {
           </div>
 
           <aside className="flex flex-col gap-5">
-            <div className="rounded-3xl border border-border/60 bg-gradient-card p-5 shadow-soft">
+            <div className="rounded-2xl border border-border/60 bg-gradient-card p-4 shadow-soft sm:rounded-3xl sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h3 className="font-display text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                   В комнате
@@ -756,8 +834,8 @@ const Room = () => {
                 </span>
               </div>
               <div className="flex flex-wrap gap-2">
-                <ViewerChip name={`${me.name} (вы)`} color={me.color} self />
-                {peerList.map((v) => <ViewerChip key={v.user + v.avatar} name={v.user} color={v.avatar} />)}
+                <ViewerChip name={`${me.name} (вы)`} color={me.color} self leader={syncLeaderId === me.id} />
+                {peerList.map((v) => <ViewerChip key={v.id} name={v.user} color={v.avatar} leader={syncLeaderId === v.id} />)}
                 {peerList.length === 0 && (
                   <p className="text-xs text-muted-foreground">
                     Откройте эту страницу в другой вкладке — зритель появится здесь автоматически.
@@ -766,7 +844,7 @@ const Room = () => {
               </div>
             </div>
 
-            <div className="flex min-h-[480px] flex-1 flex-col overflow-hidden rounded-3xl border border-border/60 bg-gradient-card shadow-soft">
+            <div className="flex max-h-[70vh] min-h-[360px] flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 bg-gradient-card shadow-soft sm:min-h-[480px] sm:rounded-3xl lg:max-h-none">
               <div className="flex items-center justify-between border-b border-border/50 px-5 py-4">
                 <div className="flex items-center gap-2">
                   <Sparkles className="h-4 w-4 text-primary-glow" />
@@ -780,7 +858,7 @@ const Room = () => {
                   }
                 }}>
                   <DialogTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-muted-foreground hover:text-foreground">
+                    <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-muted-foreground hover:text-foreground" aria-label="Настройки профиля">
                       <Settings className="h-4 w-4" />
                     </Button>
                   </DialogTrigger>
@@ -882,10 +960,11 @@ const EmptyPlayer = () => (
   </div>
 );
 
-const ViewerChip = ({ name, color, self }: { name: string; color: string; self?: boolean }) => (
+const ViewerChip = ({ name, color, self, leader }: { name: string; color: string; self?: boolean; leader?: boolean }) => (
   <div className={cn(
-    "flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm",
-    self ? "border-primary/50 bg-primary/10" : "border-border/60 bg-muted/40"
+    "flex max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-sm",
+    self ? "border-primary/50 bg-primary/10" : "border-border/60 bg-muted/40",
+    leader && "border-amber-300/60 bg-amber-300/10"
   )}>
     <span
       className="flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold text-background"
@@ -893,7 +972,13 @@ const ViewerChip = ({ name, color, self }: { name: string; color: string; self?:
     >
       {name[0]}
     </span>
-    <span className="text-foreground/90">{name}</span>
+    <span className="truncate text-foreground/90">{name}</span>
+    {leader && (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-300/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+        <Crown className="h-3 w-3" />
+        Ведущий
+      </span>
+    )}
   </div>
 );
 

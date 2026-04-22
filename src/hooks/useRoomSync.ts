@@ -18,6 +18,7 @@ export type SyncEvent =
   | { kind: "source"; source: SyncSource; at: number; from: string }
   | { kind: "chat"; id: string; user: string; avatar: string; text: string; at: number; from: string }
   | { kind: "presence"; user: string; avatar: string; at: number; from: string }
+  | { kind: "profile"; user: string; avatar: string; at: number; from: string }
   | { kind: "leave"; from: string; at: number }
   | { kind: "hello"; from: string; user: string; avatar: string; at: number }
   | { kind: "state-request"; from: string; at: number }

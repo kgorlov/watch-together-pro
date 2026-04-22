@@ -29,6 +29,7 @@ type Message = {
 };
 
 const palette = ["#6366f1", "#a78bfa", "#22d3ee", "#f472b6", "#34d399", "#fbbf24"];
+const MAX_VIDEO_UPLOAD_SIZE = 512 * 1024 * 1024;
 
 const extractYoutubeId = (input: string): string | null => {
   const trimmed = input.trim();
@@ -418,6 +419,11 @@ const Room = () => {
       return;
     }
 
+    if (file.size > MAX_VIDEO_UPLOAD_SIZE) {
+      toast.error("Файл должен быть не больше 512 МБ");
+      return;
+    }
+
     const uploadUrl = getUploadUrl();
     if (!uploadUrl) {
       toast.error("Файлы можно синхронизировать только через сервер Render");
@@ -430,6 +436,11 @@ const Room = () => {
       form.append("video", file);
       const response = await fetch(uploadUrl, { method: "POST", body: form });
       if (!response.ok) {
+        if (response.status === 413) {
+          toast.error("Файл должен быть не больше 512 МБ");
+          return;
+        }
+
         throw new Error(`Upload failed with ${response.status}`);
       }
 
@@ -856,7 +867,7 @@ const FileDrop = ({ onFile, disabled }: { onFile: (f: File) => void; disabled?: 
         <Upload className="h-6 w-6 text-primary-glow" />
       </div>
       <p className="font-medium">{disabled ? "Файл загружается..." : "Перетащите видео сюда"}</p>
-      <p className="text-xs text-muted-foreground">или нажмите, чтобы выбрать файл (MP4, WebM, MOV)</p>
+      <p className="text-xs text-muted-foreground">или нажмите, чтобы выбрать файл до 512 МБ (MP4, WebM, MOV)</p>
       <input
         type="file"
         accept="video/*"

@@ -18,7 +18,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const rooms = new Map();
 const LEAVE_GRACE_MS = 90000;
-const MAX_UPLOAD_SIZE = 250 * 1024 * 1024;
+const MAX_UPLOAD_SIZE = 512 * 1024 * 1024;
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 
@@ -40,7 +40,21 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-app.post("/api/upload", upload.single("video"), (req, res) => {
+app.post("/api/upload", (req, res, next) => {
+  upload.single("video")(req, res, (error) => {
+    if (error) {
+      if (error.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({ error: "Video file must be 512 MB or smaller" });
+        return;
+      }
+
+      res.status(400).json({ error: "Could not upload video file" });
+      return;
+    }
+
+    next();
+  });
+}, (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: "video file is required" });
     return;

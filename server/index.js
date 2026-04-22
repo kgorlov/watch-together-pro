@@ -2,7 +2,7 @@ import express from "express";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -13,6 +13,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const rooms = new Map();
+const LEAVE_GRACE_MS = 90000;
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -36,7 +37,13 @@ wss.on("connection", (socket, request) => {
 
   const client = { socket, roomCode, userId };
   const room = getRoom(roomCode);
-  room.add(client);
+  room.clients.add(client);
+
+  const existingUser = room.users.get(userId);
+  if (existingUser?.leaveTimer) {
+    clearTimeout(existingUser.leaveTimer);
+    existingUser.leaveTimer = null;
+  }
 
   socket.on("message", (data) => {
     let event;
@@ -53,16 +60,23 @@ wss.on("connection", (socket, request) => {
     event.from = userId;
     event.at = Date.now();
 
-    for (const peer of room) {
-      if (peer !== client && peer.socket.readyState === peer.socket.OPEN) {
-        peer.socket.send(JSON.stringify(event));
-      }
+    if (event.kind === "hello" || event.kind === "presence") {
+      rememberUser(room, userId, event);
+      sendKnownRoomState(socket, room, userId);
+    } else if (event.kind === "leave") {
+      scheduleUserLeave(roomCode, room, userId);
+      return;
+    } else {
+      rememberState(room, event);
     }
+
+    broadcast(room, client, event);
   });
 
   socket.on("close", () => {
-    room.delete(client);
-    if (room.size === 0) {
+    room.clients.delete(client);
+    scheduleUserLeave(roomCode, room, userId);
+    if (room.clients.size === 0 && room.users.size === 0) {
       rooms.delete(roomCode);
     }
   });
@@ -78,9 +92,145 @@ function getRoom(roomCode) {
     return existing;
   }
 
-  const room = new Set();
+  const room = {
+    clients: new Set(),
+    users: new Map(),
+    state: {
+      source: { type: "none" },
+      t: 0,
+      playing: false,
+      from: "",
+      at: Date.now(),
+    },
+  };
   rooms.set(roomCode, room);
   return room;
+}
+
+function rememberUser(room, userId, event) {
+  const existing = room.users.get(userId);
+  if (existing?.leaveTimer) {
+    clearTimeout(existing.leaveTimer);
+  }
+
+  room.users.set(userId, {
+    user: typeof event.user === "string" ? event.user : "Guest",
+    avatar: typeof event.avatar === "string" ? event.avatar : "#6366f1",
+    lastSeen: event.at,
+    leaveTimer: null,
+  });
+}
+
+function sendKnownRoomState(socket, room, selfId) {
+  for (const [userId, user] of room.users) {
+    if (userId === selfId) continue;
+    send(socket, {
+      kind: "presence",
+      from: userId,
+      user: user.user,
+      avatar: user.avatar,
+      at: user.lastSeen,
+    });
+  }
+
+  if (room.state.source.type !== "none") {
+    send(socket, {
+      kind: "state-snapshot",
+      source: room.state.source,
+      t: estimateStateTime(room.state),
+      playing: room.state.playing,
+      from: room.state.from || "server",
+      at: Date.now(),
+    });
+  }
+}
+
+function rememberState(room, event) {
+  if (event.kind === "source") {
+    room.state = {
+      source: event.source,
+      t: 0,
+      playing: false,
+      from: event.from,
+      at: event.at,
+    };
+    return;
+  }
+
+  if (event.kind === "play" || event.kind === "pause" || event.kind === "seek") {
+    room.state = {
+      ...room.state,
+      t: typeof event.t === "number" ? event.t : room.state.t,
+      playing: event.kind === "play" ? true : event.kind === "pause" ? false : room.state.playing,
+      from: event.from,
+      at: event.at,
+    };
+    return;
+  }
+
+  if (event.kind === "tick") {
+    room.state = {
+      ...room.state,
+      t: typeof event.t === "number" ? event.t : room.state.t,
+      playing: Boolean(event.playing),
+      from: event.from,
+      at: event.at,
+    };
+    return;
+  }
+
+  if (event.kind === "state-snapshot") {
+    room.state = {
+      source: event.source,
+      t: typeof event.t === "number" ? event.t : 0,
+      playing: Boolean(event.playing),
+      from: event.from,
+      at: event.at,
+    };
+  }
+}
+
+function estimateStateTime(state) {
+  if (!state.playing) {
+    return state.t;
+  }
+
+  return state.t + Math.max(0, Date.now() - state.at) / 1000;
+}
+
+function scheduleUserLeave(roomCode, room, userId) {
+  const user = room.users.get(userId);
+  if (!user || user.leaveTimer) {
+    return;
+  }
+
+  user.leaveTimer = setTimeout(() => {
+    const stillConnected = Array.from(room.clients).some((client) => client.userId === userId);
+    if (stillConnected) {
+      user.leaveTimer = null;
+      return;
+    }
+
+    room.users.delete(userId);
+    broadcast(room, null, { kind: "leave", from: userId, at: Date.now() });
+    if (room.clients.size === 0 && room.users.size === 0) {
+      rooms.delete(roomCode);
+    }
+  }, LEAVE_GRACE_MS);
+}
+
+function broadcast(room, sender, event) {
+  for (const peer of room.clients) {
+    if (peer !== sender && peer.socket.readyState === WebSocket.OPEN) {
+      send(peer.socket, event);
+    }
+  }
+}
+
+function send(socket, event) {
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(event));
+  }
 }
 
 function normalizeRoomCode(value) {

@@ -83,6 +83,7 @@ const Room = () => {
   // Suppress local event re-broadcast when applying remote events
   const applyingRemoteRef = useRef(false);
   const syncLeaderRef = useRef<string | null>(null);
+  const pendingRemotePlaybackRef = useRef<{ t: number; playing: boolean; until: number } | null>(null);
   const sourceRef = useRef<Source>(source);
   sourceRef.current = source;
   const playingRef = useRef(playing);
@@ -131,28 +132,17 @@ const Room = () => {
       }
       case "play": {
         syncLeaderRef.current = e.from;
-        applyingRemoteRef.current = true;
-        seekInternal(e.t);
-        playInternal();
-        setPlaying(true);
-        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+        applyRemotePlayback(e.t, true);
         break;
       }
       case "pause": {
         syncLeaderRef.current = e.from;
-        applyingRemoteRef.current = true;
-        seekInternal(e.t);
-        pauseInternal();
-        setPlaying(false);
-        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+        applyRemotePlayback(e.t, false);
         break;
       }
       case "seek": {
         syncLeaderRef.current = e.from;
-        applyingRemoteRef.current = true;
-        seekInternal(e.t);
-        setProgress(e.t);
-        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+        applyRemotePlayback(e.t, playingRef.current);
         break;
       }
       case "tick": {
@@ -160,20 +150,19 @@ const Room = () => {
         // Soft drift correction: avoid jitter from tiny player differences.
         const cur = currentTimeInternal();
         if (Math.abs(cur - e.t) > 4) {
-          applyingRemoteRef.current = true;
-          seekInternal(e.t);
-          setProgress(e.t);
-          window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+          applyRemotePlayback(e.t, e.playing);
         }
         break;
       }
       case "state-snapshot": {
-        if (sourceRef.current.type === "none" && e.source.type === "youtube") {
+        if (e.source.type === "youtube") {
           syncLeaderRef.current = e.from;
           applyingRemoteRef.current = true;
-          setSource({ type: "youtube", videoId: e.source.videoId });
-          setProgress(e.t);
-          setPlaying(e.playing);
+          const cur = sourceRef.current;
+          if (cur.type !== "youtube" || cur.videoId !== e.source.videoId) {
+            setSource({ type: "youtube", videoId: e.source.videoId });
+          }
+          applyRemotePlayback(e.t, e.playing);
           window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         }
         break;
@@ -223,18 +212,14 @@ const Room = () => {
       send({ kind: "presence", user: me.name, avatar: me.color } as Omit<SyncEvent, "from" | "at">);
       // Mobile browsers can throttle timers, so keep presence tolerant.
       setPeers((p) => {
-        const cutoff = Date.now() - 45000;
+        const cutoff = Date.now() - 120000;
         const next: typeof p = {};
         for (const [k, v] of Object.entries(p)) if (v.lastSeen > cutoff) next[k] = v;
         return next;
       });
-    }, 10000);
-    const onUnload = () => send({ kind: "leave" } as Omit<SyncEvent, "from" | "at">);
-    window.addEventListener("beforeunload", onUnload);
+    }, 15000);
     return () => {
       window.clearInterval(presenceId);
-      window.removeEventListener("beforeunload", onUnload);
-      onUnload();
     };
   }, [send, me.name, me.color]);
 
@@ -302,6 +287,40 @@ const Room = () => {
   const pauseInternal = () => {
     if (sourceRef.current.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.pauseVideo();
     else if (sourceRef.current.type === "file" && videoRef.current) videoRef.current.pause();
+  };
+
+  const applyRemotePlayback = (t: number, shouldPlay: boolean) => {
+    pendingRemotePlaybackRef.current = { t, playing: shouldPlay, until: Date.now() + 12000 };
+    applyPendingRemotePlayback();
+  };
+
+  const applyPendingRemotePlayback = () => {
+    const pending = pendingRemotePlaybackRef.current;
+    if (!pending) return;
+
+    const playerReady =
+      sourceRef.current.type === "youtube"
+        ? Boolean(ytPlayerRef.current)
+        : sourceRef.current.type === "file"
+          ? Boolean(videoRef.current)
+          : false;
+
+    setProgress(pending.t);
+    setPlaying(pending.playing);
+
+    if (!playerReady) {
+      if (Date.now() < pending.until) {
+        window.setTimeout(applyPendingRemotePlayback, 500);
+      }
+      return;
+    }
+
+    applyingRemoteRef.current = true;
+    seekInternal(pending.t);
+    if (pending.playing) playInternal();
+    else pauseInternal();
+    window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+    pendingRemotePlaybackRef.current = null;
   };
 
   // ---- User actions (broadcast) ----
@@ -469,11 +488,12 @@ const Room = () => {
                     opts={{
                       width: "100%",
                       height: "100%",
-                      playerVars: { autoplay: 0, modestbranding: 1, rel: 0, controls: 0 },
+                      playerVars: { autoplay: 0, modestbranding: 1, rel: 0, controls: 1, playsinline: 1 },
                     }}
                     onReady={(e) => {
                       ytPlayerRef.current = e.target;
                       e.target.setVolume(volume);
+                      applyPendingRemotePlayback();
                     }}
                     onPlay={handleNativePlay}
                     onPause={handleNativePause}

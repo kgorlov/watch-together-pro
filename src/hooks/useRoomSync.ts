@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef } from "react";
 export type SyncSource =
   | { type: "none" }
   | { type: "youtube"; videoId: string }
-  | { type: "file"; name: string };
+  | { type: "file"; name: string; url: string };
 
 export type SyncEvent =
   | { kind: "play"; t: number; at: number; from: string }

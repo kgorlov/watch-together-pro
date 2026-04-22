@@ -46,12 +46,48 @@ const extractYoutubeId = (input: string): string | null => {
   return null;
 };
 
+const getBackendBaseUrl = () => {
+  const explicitUrl = import.meta.env.VITE_SYNC_SERVER_URL as string | undefined;
+  if (explicitUrl?.trim()) {
+    return explicitUrl.trim();
+  }
+
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const { hostname, origin, protocol } = window.location;
+  const isGitHubPages = hostname.endsWith("github.io");
+  if (!origin || isGitHubPages || protocol === "file:") {
+    return "";
+  }
+
+  return origin;
+};
+
+const getUploadUrl = () => {
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) return "";
+  return new URL("/api/upload", baseUrl).toString();
+};
+
+const resolveMediaUrl = (url: string) => {
+  if (/^https?:\/\//i.test(url)) {
+    return url;
+  }
+
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) return url;
+  return new URL(url, baseUrl).toString();
+};
+
 const Room = () => {
   const { code = "ROOM" } = useParams();
   const navigate = useNavigate();
   const [source, setSource] = useState<Source>({ type: "none" });
   const [copied, setCopied] = useState(false);
   const [ytUrl, setYtUrl] = useState("");
+  const [uploadingFile, setUploadingFile] = useState(false);
 
   // user identity (demo) — stable id for sync deduping
   const [me] = useState(() => {
@@ -134,7 +170,6 @@ const Room = () => {
       case "source": {
         syncLeaderRef.current = e.from;
         const cur = sourceRef.current;
-        // Only adopt YouTube remotely (file blobs are tab-local)
         if (e.source.type === "youtube") {
           if (cur.type !== "youtube" || cur.videoId !== e.source.videoId) {
             applyingRemoteRef.current = true;
@@ -144,8 +179,13 @@ const Room = () => {
             setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} включил(а) видео с YouTube`)]);
           }
         } else if (e.source.type === "file") {
-          const fileName = e.source.type === "file" ? e.source.name : "";
-          setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} загрузил(а) файл «${fileName}» (только в его вкладке)`)]);
+          if (cur.type !== "file" || cur.url !== e.source.url) {
+            applyingRemoteRef.current = true;
+            setSource({ type: "file", url: resolveMediaUrl(e.source.url), name: e.source.name });
+            setProgress(0);
+            setPlaying(false);
+            setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} загрузил(а) файл «${e.source.name}»`)]);
+          }
         }
         break;
       }
@@ -183,6 +223,16 @@ const Room = () => {
           }
           applyRemotePlayback(e.t, e.playing);
           window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+        } else if (e.source.type === "file") {
+          syncLeaderRef.current = e.from;
+          applyingRemoteRef.current = true;
+          const cur = sourceRef.current;
+          const url = resolveMediaUrl(e.source.url);
+          if (cur.type !== "file" || cur.url !== url) {
+            setSource({ type: "file", url, name: e.source.name });
+          }
+          applyRemotePlayback(e.t, e.playing);
+          window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
         }
         break;
       }
@@ -211,7 +261,7 @@ const Room = () => {
         const src = sourceRef.current;
         const syncSrc: SyncSource =
           src.type === "youtube" ? { type: "youtube", videoId: src.videoId }
-            : src.type === "file" ? { type: "file", name: src.name }
+            : src.type === "file" ? { type: "file", name: src.name, url: src.url }
               : { type: "none" };
         send({
           kind: "state-snapshot",
@@ -362,18 +412,44 @@ const Room = () => {
     toast.success("Видео загружено и синхронизировано");
   };
 
-  const handleFile = (file: File) => {
+  const handleFile = async (file: File) => {
     if (!file.type.startsWith("video/")) {
       toast.error("Это не видеофайл");
       return;
     }
-    const url = URL.createObjectURL(file);
-    setSource({ type: "file", url, name: file.name });
-    syncLeaderRef.current = me.id;
-    setPlaying(false);
-    announce(`${me.name} загрузил(а) файл «${file.name}»`);
-    send({ kind: "source", source: { type: "file", name: file.name } } as Omit<SyncEvent, "from" | "at">);
-    toast.success("Файл готов к просмотру");
+
+    const uploadUrl = getUploadUrl();
+    if (!uploadUrl) {
+      toast.error("Файлы можно синхронизировать только через сервер Render");
+      return;
+    }
+
+    setUploadingFile(true);
+    try {
+      const form = new FormData();
+      form.append("video", file);
+      const response = await fetch(uploadUrl, { method: "POST", body: form });
+      if (!response.ok) {
+        throw new Error(`Upload failed with ${response.status}`);
+      }
+
+      const uploaded = await response.json() as { name: string; url: string };
+      const url = resolveMediaUrl(uploaded.url);
+      setSource({ type: "file", url, name: uploaded.name || file.name });
+      syncLeaderRef.current = me.id;
+      setPlaying(false);
+      setProgress(0);
+      announce(`${me.name} загрузил(а) файл «${uploaded.name || file.name}»`);
+      send({
+        kind: "source",
+        source: { type: "file", name: uploaded.name || file.name, url: uploaded.url },
+      } as Omit<SyncEvent, "from" | "at">);
+      toast.success("Файл загружен и синхронизирован");
+    } catch {
+      toast.error("Не удалось загрузить файл на сервер");
+    } finally {
+      setUploadingFile(false);
+    }
   };
 
   const togglePlay = () => {
@@ -619,9 +695,9 @@ const Room = () => {
                 </TabsContent>
 
                 <TabsContent value="file" className="mt-4">
-                  <FileDrop onFile={handleFile} />
+                  <FileDrop onFile={handleFile} disabled={uploadingFile} />
                   <p className="mt-3 text-xs text-muted-foreground">
-                    Локальные файлы видны только в вашей вкладке (без backend). Для общего просмотра используйте YouTube.
+                    Файл загружается на сервер комнаты, чтобы его могли смотреть все участники.
                   </p>
                 </TabsContent>
               </Tabs>
@@ -757,32 +833,35 @@ const ChatBubble = ({ m, isMe }: { m: Message; isMe: boolean }) => {
   );
 };
 
-const FileDrop = ({ onFile }: { onFile: (f: File) => void }) => {
+const FileDrop = ({ onFile, disabled }: { onFile: (f: File) => void; disabled?: boolean }) => {
   const [drag, setDrag] = useState(false);
   return (
     <label
-      onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+      onDragOver={(e) => { e.preventDefault(); if (!disabled) setDrag(true); }}
       onDragLeave={() => setDrag(false)}
       onDrop={(e) => {
         e.preventDefault();
         setDrag(false);
+        if (disabled) return;
         const f = e.dataTransfer.files?.[0];
         if (f) onFile(f);
       }}
       className={cn(
         "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed p-8 text-center transition-all",
+        disabled && "pointer-events-none opacity-60",
         drag ? "border-primary bg-primary/10" : "border-border/60 bg-muted/30 hover:border-primary/50"
       )}
     >
       <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/15">
         <Upload className="h-6 w-6 text-primary-glow" />
       </div>
-      <p className="font-medium">Перетащите видео сюда</p>
+      <p className="font-medium">{disabled ? "Файл загружается..." : "Перетащите видео сюда"}</p>
       <p className="text-xs text-muted-foreground">или нажмите, чтобы выбрать файл (MP4, WebM, MOV)</p>
       <input
         type="file"
         accept="video/*"
         className="hidden"
+        disabled={disabled}
         onChange={(e) => {
           const f = e.target.files?.[0];
           if (f) onFile(f);

@@ -1,12 +1,16 @@
 import express from "express";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import multer from "multer";
 import { WebSocket, WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const distDir = path.join(rootDir, "dist");
+const uploadsDir = path.join(rootDir, "uploads");
 const port = Number(process.env.PORT ?? 3000);
 
 const app = express();
@@ -14,10 +18,45 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const rooms = new Map();
 const LEAVE_GRACE_MS = 90000;
+const MAX_UPLOAD_SIZE = 250 * 1024 * 1024;
+
+fs.mkdirSync(uploadsDir, { recursive: true });
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: uploadsDir,
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase().replace(/[^.\w-]/g, "") || ".mp4";
+      cb(null, `${Date.now()}-${randomUUID()}${ext}`);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_SIZE },
+  fileFilter: (_req, file, cb) => {
+    cb(null, file.mimetype.startsWith("video/"));
+  },
+});
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+app.post("/api/upload", upload.single("video"), (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "video file is required" });
+    return;
+  }
+
+  res.json({
+    name: req.file.originalname,
+    url: `/uploads/${req.file.filename}`,
+  });
+});
+
+app.use("/uploads", express.static(uploadsDir, {
+  acceptRanges: true,
+  immutable: true,
+  maxAge: "1h",
+}));
 
 app.use(express.static(distDir));
 

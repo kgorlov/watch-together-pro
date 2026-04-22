@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: lumen-watch-together
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit

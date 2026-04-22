@@ -1,8 +1,10 @@
 # Люмен
 
-Красивый React/Vite интерфейс для совместного просмотра видео.
+React/Vite приложение для совместного просмотра видео с комнатами, чатом и синхронизацией воспроизведения.
 
-## Запуск
+## Локальный запуск
+
+Фронтенд без онлайн-сервера:
 
 ```bash
 npm install
@@ -11,28 +13,46 @@ npm run dev
 
 Открыть `http://localhost:8080`.
 
+Production-режим с WebSocket-сервером:
+
+```bash
+npm run build
+npm start
+```
+
+Открыть `http://localhost:3000`.
+
 ## Проверка
 
 ```bash
 npm run build
 npm test
+npm run lint
 ```
 
-## Деплой на GitHub Pages
+## Онлайн-деплой с настоящими комнатами
 
-В проект добавлен workflow `.github/workflows/deploy.yml`.
+Для реальной синхронизации между разными устройствами нужен WebSocket-сервер. В проект добавлен `server/index.js` и `render.yaml`, поэтому самый простой бесплатный вариант:
 
-1. Запушить проект в репозиторий `kgorlov/watch-together-pro`.
-2. Открыть `Settings` -> `Pages`.
-3. В `Build and deployment` выбрать `GitHub Actions`.
-4. Запушить изменения в ветку `main`.
+1. Открыть Render.
+2. Выбрать `New` -> `Blueprint`.
+3. Подключить репозиторий `kgorlov/watch-together-pro`.
+4. Render прочитает `render.yaml`, выполнит `npm ci && npm run build` и запустит `npm start`.
 
-После выполнения workflow сайт будет доступен по адресу:
+После деплоя сайт будет доступен по адресу Render. Именно эту ссылку нужно отправлять другу, например:
 
 ```text
-https://kgorlov.github.io/watch-together-pro/
+https://lumen-watch-together.onrender.com/#/room/ABC123
 ```
 
-## Важный нюанс
+## GitHub Pages
 
-Сейчас проект статический: синхронизация работает через `BroadcastChannel` между вкладками одного браузера на одном origin. Для реального совместного просмотра между разными пользователями по интернету нужен backend/WebSocket.
+GitHub Pages тоже поддерживается, но там работает только статическая версия. Без переменной `VITE_SYNC_SERVER_URL` она использует локальный fallback через `BroadcastChannel`, то есть синхронизация работает только между вкладками одного браузера.
+
+Если нужен GitHub Pages + отдельный WebSocket-сервер, добавь переменную GitHub Actions:
+
+```text
+VITE_SYNC_SERVER_URL=https://<render-service>.onrender.com
+```
+
+Тогда Pages-сборка будет подключаться к Render-серверу.

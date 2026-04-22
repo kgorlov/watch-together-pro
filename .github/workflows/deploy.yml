@@ -38,6 +38,7 @@ jobs:
         run: npm run build
         env:
           GITHUB_PAGES: "true"
+          VITE_SYNC_SERVER_URL: ${{ vars.VITE_SYNC_SERVER_URL }}
 
       - name: Add SPA fallback
         run: cp dist/index.html dist/404.html

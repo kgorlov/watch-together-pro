@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Play, Sparkles, Users, Youtube, Upload, MessagesSquare, Film, ArrowRight } from "lucide-react";
+import { Play, Users, Youtube, Upload, MessagesSquare, Film, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import heroImg from "@/assets/hero-cinema.jpg";
@@ -62,10 +62,6 @@ const Index = () => {
       {/* Hero */}
       <main className="relative z-10 mx-auto max-w-7xl px-6">
         <section className={`pt-16 pb-24 text-center ${mounted ? "animate-fade-up" : "opacity-0"}`}>
-          <div className="mx-auto inline-flex items-center gap-2 rounded-full glass px-4 py-1.5 text-xs font-medium text-muted-foreground">
-            <Sparkles className="h-3.5 w-3.5 text-primary-glow" />
-            Совместный кинопросмотр в реальном времени
-          </div>
 
           <h1 className="mx-auto mt-8 max-w-4xl font-display text-5xl font-bold leading-[1.05] tracking-tight md:text-7xl lg:text-[88px]">
             Один сеанс.

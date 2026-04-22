@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import YouTube, { YouTubePlayer } from "react-youtube";
 import {
   Film, Users, Copy, Check, Send, Youtube as YoutubeIcon, Upload, Link as LinkIcon,
-  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles
+  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { useRoomSync, type SyncEvent, type SyncSource } from "@/hooks/useRoomSync";
+import { SyncTimeline } from "@/components/SyncTimeline";
 
 type Source =
   | { type: "none" }
@@ -27,7 +29,6 @@ type Message = {
 };
 
 const palette = ["#6366f1", "#a78bfa", "#22d3ee", "#f472b6", "#34d399", "#fbbf24"];
-const fakeNames = ["Мия", "Артур", "Лена", "Кай", "Соня"];
 
 const extractYoutubeId = (input: string): string | null => {
   const trimmed = input.trim();
@@ -45,13 +46,6 @@ const extractYoutubeId = (input: string): string | null => {
   return null;
 };
 
-const formatTime = (seconds: number) => {
-  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-};
-
 const Room = () => {
   const { code = "ROOM" } = useParams();
   const navigate = useNavigate();
@@ -59,30 +53,25 @@ const Room = () => {
   const [copied, setCopied] = useState(false);
   const [ytUrl, setYtUrl] = useState("");
 
-  // user identity (demo)
+  // user identity (demo) — stable id for sync deduping
   const [me] = useState(() => {
     const name = `Гость-${Math.floor(Math.random() * 900 + 100)}`;
     const color = palette[Math.floor(Math.random() * palette.length)];
-    return { name, color };
+    const id = crypto.randomUUID();
+    return { name, color, id };
   });
 
-  // viewers (demo)
-  const [viewers] = useState(() => {
-    const others = fakeNames.slice(0, 3 + Math.floor(Math.random() * 2)).map((n, i) => ({
-      name: n,
-      color: palette[(i + 1) % palette.length],
-    }));
-    return others;
-  });
+  // Live presence of other tabs in this room
+  const [peers, setPeers] = useState<Record<string, { user: string; avatar: string; lastSeen: number }>>({});
 
   // chat
   const [messages, setMessages] = useState<Message[]>([
-    { id: "s1", user: "system", avatar: "", text: `Комната ${code} создана. Поделитесь кодом с друзьями ✨`, ts: Date.now(), system: true },
+    { id: "s1", user: "system", avatar: "", text: `Комната ${code} создана. Откройте эту же ссылку в новой вкладке — синхронизация заработает автоматически ✨`, ts: Date.now(), system: true },
   ]);
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // playback state for video element / YT player
+  // playback
   const ytPlayerRef = useRef<YouTubePlayer | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -91,33 +80,152 @@ const Room = () => {
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(80);
 
+  // Suppress local event re-broadcast when applying remote events
+  const applyingRemoteRef = useRef(false);
+  const sourceRef = useRef<Source>(source);
+  sourceRef.current = source;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
-  // Simulated incoming chat messages from other "viewers"
-  useEffect(() => {
-    const lines = [
-      "Привет всем 👋",
-      "Качество огонь",
-      "Жду начала!",
-      "Можем перемотать на начало?",
-      "ахаха момент",
-      "🎬🍿",
-    ];
-    const id = setInterval(() => {
-      if (Math.random() < 0.35) {
-        const v = viewers[Math.floor(Math.random() * viewers.length)];
-        if (!v) return;
-        const text = lines[Math.floor(Math.random() * lines.length)];
-        setMessages((m) => [
-          ...m,
-          { id: crypto.randomUUID(), user: v.name, avatar: v.color, text, ts: Date.now() },
-        ]);
+  // ---- Sync setup ----
+  const onSyncEvent = useCallback((e: SyncEvent) => {
+    switch (e.kind) {
+      case "hello":
+      case "presence": {
+        setPeers((p) => ({
+          ...p,
+          [e.from]: { user: e.user, avatar: e.avatar, lastSeen: e.at },
+        }));
+        if (e.kind === "hello") {
+          // greet new peer with current state
+          window.setTimeout(() => sendRef.current?.snapshot(), 50);
+        }
+        break;
       }
-    }, 9000);
-    return () => clearInterval(id);
-  }, [viewers]);
+      case "leave": {
+        setPeers((p) => { const n = { ...p }; delete n[e.from]; return n; });
+        break;
+      }
+      case "source": {
+        const cur = sourceRef.current;
+        // Only adopt YouTube remotely (file blobs are tab-local)
+        if (e.source.type === "youtube") {
+          if (cur.type !== "youtube" || cur.videoId !== e.source.videoId) {
+            applyingRemoteRef.current = true;
+            setSource({ type: "youtube", videoId: e.source.videoId });
+            setProgress(0);
+            setPlaying(false);
+            setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} включил(а) видео с YouTube`)]);
+          }
+        } else if (e.source.type === "file") {
+          const fileName = e.source.type === "file" ? e.source.name : "";
+          setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} загрузил(а) файл «${fileName}» (только в его вкладке)`)]);
+        }
+        break;
+      }
+      case "play": {
+        applyingRemoteRef.current = true;
+        seekInternal(e.t);
+        playInternal();
+        setPlaying(true);
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 250);
+        break;
+      }
+      case "pause": {
+        applyingRemoteRef.current = true;
+        seekInternal(e.t);
+        pauseInternal();
+        setPlaying(false);
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 250);
+        break;
+      }
+      case "seek": {
+        applyingRemoteRef.current = true;
+        seekInternal(e.t);
+        setProgress(e.t);
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 250);
+        break;
+      }
+      case "tick": {
+        // Soft drift correction: if difference > 1.5s, snap
+        const cur = currentTimeInternal();
+        if (Math.abs(cur - e.t) > 1.5) {
+          applyingRemoteRef.current = true;
+          seekInternal(e.t);
+          setProgress(e.t);
+          window.setTimeout(() => { applyingRemoteRef.current = false; }, 200);
+        }
+        break;
+      }
+      case "state-snapshot": {
+        if (sourceRef.current.type === "none" && e.source.type === "youtube") {
+          applyingRemoteRef.current = true;
+          setSource({ type: "youtube", videoId: e.source.videoId });
+          setProgress(e.t);
+          setPlaying(e.playing);
+          window.setTimeout(() => { applyingRemoteRef.current = false; }, 300);
+        }
+        break;
+      }
+      case "chat": {
+        setMessages((m) => [...m, { id: e.id, user: e.user, avatar: e.avatar, text: e.text, ts: e.at }]);
+        break;
+      }
+      case "state-request": {
+        sendRef.current?.snapshot();
+        break;
+      }
+    }
+  }, [peers]);
+
+  const { send } = useRoomSync(code, me.id, onSyncEvent);
+
+  // Helpers + ref so we can call from event handler
+  const sendRef = useRef<{ snapshot: () => void } | null>(null);
+  useEffect(() => {
+    sendRef.current = {
+      snapshot: () => {
+        const src = sourceRef.current;
+        const syncSrc: SyncSource =
+          src.type === "youtube" ? { type: "youtube", videoId: src.videoId }
+          : src.type === "file" ? { type: "file", name: src.name }
+          : { type: "none" };
+        send({
+          kind: "state-snapshot",
+          source: syncSrc,
+          t: currentTimeInternal(),
+          playing: playingRef.current,
+        } as Omit<SyncEvent, "from" | "at">);
+      },
+    };
+  }, [send]);
+
+  // Hello on mount, leave on unmount
+  useEffect(() => {
+    send({ kind: "hello", user: me.name, avatar: me.color } as Omit<SyncEvent, "from" | "at">);
+    send({ kind: "state-request" } as Omit<SyncEvent, "from" | "at">);
+    const presenceId = window.setInterval(() => {
+      send({ kind: "presence", user: me.name, avatar: me.color } as Omit<SyncEvent, "from" | "at">);
+      // Prune dead peers (no presence in 12s)
+      setPeers((p) => {
+        const cutoff = Date.now() - 12000;
+        const next: typeof p = {};
+        for (const [k, v] of Object.entries(p)) if (v.lastSeen > cutoff) next[k] = v;
+        return next;
+      });
+    }, 4000);
+    const onUnload = () => send({ kind: "leave" } as Omit<SyncEvent, "from" | "at">);
+    window.addEventListener("beforeunload", onUnload);
+    return () => {
+      window.clearInterval(presenceId);
+      window.removeEventListener("beforeunload", onUnload);
+      onUnload();
+    };
+  }, [send, me.name, me.color]);
 
   // file <video> progress tracker
   useEffect(() => {
@@ -143,13 +251,50 @@ const Room = () => {
       try {
         setProgress(await p.getCurrentTime());
         setDuration(await p.getDuration());
-      } catch {}
+      } catch {/* noop */}
     }, 500);
     return () => clearInterval(id);
   }, [source]);
 
+  // Heartbeat tick: broadcast time to keep peers aligned
+  useEffect(() => {
+    if (source.type === "none") return;
+    const id = window.setInterval(() => {
+      if (!playingRef.current) return;
+      send({ kind: "tick", t: currentTimeInternal(), playing: true } as Omit<SyncEvent, "from" | "at">);
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [source, send]);
+
+  // ---- Internal player helpers (no broadcast) ----
+  const currentTimeInternal = (): number => {
+    if (sourceRef.current.type === "youtube" && ytPlayerRef.current) {
+      try { return ytPlayerRef.current.getCurrentTime() as number; } catch { return progress; }
+    }
+    if (sourceRef.current.type === "file" && videoRef.current) {
+      return videoRef.current.currentTime;
+    }
+    return progress;
+  };
+  const seekInternal = (t: number) => {
+    if (sourceRef.current.type === "youtube" && ytPlayerRef.current) {
+      ytPlayerRef.current.seekTo(t, true);
+    } else if (sourceRef.current.type === "file" && videoRef.current) {
+      videoRef.current.currentTime = t;
+    }
+  };
+  const playInternal = () => {
+    if (sourceRef.current.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.playVideo();
+    else if (sourceRef.current.type === "file" && videoRef.current) videoRef.current.play().catch(() => {});
+  };
+  const pauseInternal = () => {
+    if (sourceRef.current.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.pauseVideo();
+    else if (sourceRef.current.type === "file" && videoRef.current) videoRef.current.pause();
+  };
+
+  // ---- User actions (broadcast) ----
   const announce = (text: string) =>
-    setMessages((m) => [...m, { id: crypto.randomUUID(), user: "system", avatar: "", text, ts: Date.now(), system: true }]);
+    setMessages((m) => [...m, sysMsg(text)]);
 
   const handleSetYoutube = () => {
     const vid = extractYoutubeId(ytUrl);
@@ -160,7 +305,9 @@ const Room = () => {
     setSource({ type: "youtube", videoId: vid });
     setYtUrl("");
     setPlaying(false);
+    setProgress(0);
     announce(`${me.name} включил(а) видео с YouTube`);
+    send({ kind: "source", source: { type: "youtube", videoId: vid } } as Omit<SyncEvent, "from" | "at">);
     toast.success("Видео загружено и синхронизировано");
   };
 
@@ -173,40 +320,32 @@ const Room = () => {
     setSource({ type: "file", url, name: file.name });
     setPlaying(false);
     announce(`${me.name} загрузил(а) файл «${file.name}»`);
+    send({ kind: "source", source: { type: "file", name: file.name } } as Omit<SyncEvent, "from" | "at">);
     toast.success("Файл готов к просмотру");
   };
 
   const togglePlay = () => {
-    if (source.type === "youtube") {
-      const p = ytPlayerRef.current;
-      if (!p) return;
-      if (playing) p.pauseVideo(); else p.playVideo();
-    } else if (source.type === "file" && videoRef.current) {
-      const v = videoRef.current;
-      if (playing) v.pause(); else v.play();
-    }
-    setPlaying((s) => !s);
-    announce(`${me.name} ${playing ? "поставил(а) на паузу" : "включил(а) воспроизведение"}`);
+    const next = !playing;
+    if (next) playInternal(); else pauseInternal();
+    setPlaying(next);
+    send({
+      kind: next ? "play" : "pause",
+      t: currentTimeInternal(),
+    } as Omit<SyncEvent, "from" | "at">);
   };
 
   const seekTo = (val: number) => {
-    if (source.type === "youtube" && ytPlayerRef.current) {
-      ytPlayerRef.current.seekTo(val, true);
-    } else if (source.type === "file" && videoRef.current) {
-      videoRef.current.currentTime = val;
-    }
+    seekInternal(val);
     setProgress(val);
+    send({ kind: "seek", t: val } as Omit<SyncEvent, "from" | "at">);
   };
 
   const restart = () => seekTo(0);
 
   const setVol = (v: number) => {
     setVolume(v);
-    if (source.type === "youtube" && ytPlayerRef.current) {
-      ytPlayerRef.current.setVolume(v);
-    } else if (videoRef.current) {
-      videoRef.current.volume = v / 100;
-    }
+    if (source.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.setVolume(v);
+    else if (videoRef.current) videoRef.current.volume = v / 100;
   };
 
   const toggleMute = () => {
@@ -219,31 +358,49 @@ const Room = () => {
     }
   };
 
+  // Native player event guards: only broadcast if NOT applying remote
+  const handleNativePlay = () => {
+    setPlaying(true);
+    if (applyingRemoteRef.current) return;
+    send({ kind: "play", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
+  };
+  const handleNativePause = () => {
+    setPlaying(false);
+    if (applyingRemoteRef.current) return;
+    send({ kind: "pause", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
+  };
+
   const sendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
-    setMessages((m) => [
-      ...m,
-      { id: crypto.randomUUID(), user: me.name, avatar: me.color, text: chatInput.trim(), ts: Date.now() },
-    ]);
+    const id = crypto.randomUUID();
+    setMessages((m) => [...m, { id, user: me.name, avatar: me.color, text: chatInput.trim(), ts: Date.now() }]);
+    send({
+      kind: "chat",
+      id,
+      user: me.name,
+      avatar: me.color,
+      text: chatInput.trim(),
+    } as Omit<SyncEvent, "from" | "at">);
     setChatInput("");
   };
 
   const copyCode = async () => {
-    await navigator.clipboard.writeText(code);
+    await navigator.clipboard.writeText(window.location.href);
     setCopied(true);
-    toast.success("Код скопирован");
+    toast.success("Ссылка на комнату скопирована");
     setTimeout(() => setCopied(false), 1500);
   };
 
+  const peerList = Object.values(peers);
+  const onlineCount = peerList.length + 1;
+
   return (
     <div className="relative min-h-screen bg-background text-foreground">
-      {/* ambient bg */}
       <div className="pointer-events-none absolute inset-0 bg-hero opacity-60" aria-hidden />
       <div className="pointer-events-none absolute -top-40 left-1/3 h-[500px] w-[500px] rounded-full bg-primary/15 blur-[140px]" aria-hidden />
 
       <div className="relative z-10 mx-auto flex max-w-[1500px] flex-col gap-6 px-4 py-5 lg:px-8">
-        {/* Header */}
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="icon" onClick={() => navigate("/")} className="rounded-xl">
@@ -259,9 +416,9 @@ const Room = () => {
 
           <div className="flex items-center gap-3">
             <div className="hidden items-center gap-2 rounded-full glass px-4 py-2 text-sm md:flex">
-              <Users className="h-4 w-4 text-primary-glow" />
-              <span className="text-muted-foreground">Зрителей:</span>
-              <span className="font-semibold">{viewers.length + 1}</span>
+              <Radio className="h-4 w-4 text-emerald-400 animate-pulse" />
+              <span className="text-muted-foreground">LIVE</span>
+              <span className="font-semibold">{onlineCount}</span>
             </div>
             <button
               onClick={copyCode}
@@ -276,11 +433,8 @@ const Room = () => {
           </div>
         </header>
 
-        {/* Main grid */}
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-          {/* Player column */}
           <div className="space-y-5">
-            {/* Player surface */}
             <div className="relative overflow-hidden rounded-3xl border border-border/60 bg-black shadow-elevated">
               <div className="aspect-video w-full">
                 {source.type === "none" && <EmptyPlayer />}
@@ -293,14 +447,14 @@ const Room = () => {
                     opts={{
                       width: "100%",
                       height: "100%",
-                      playerVars: { autoplay: 0, modestbranding: 1, rel: 0 },
+                      playerVars: { autoplay: 0, modestbranding: 1, rel: 0, controls: 0 },
                     }}
                     onReady={(e) => {
                       ytPlayerRef.current = e.target;
                       e.target.setVolume(volume);
                     }}
-                    onPlay={() => setPlaying(true)}
-                    onPause={() => setPlaying(false)}
+                    onPlay={handleNativePlay}
+                    onPause={handleNativePause}
                     onEnd={() => setPlaying(false)}
                   />
                 )}
@@ -310,28 +464,24 @@ const Room = () => {
                     ref={videoRef}
                     src={source.url}
                     className="h-full w-full bg-black object-contain"
-                    onPlay={() => setPlaying(true)}
-                    onPause={() => setPlaying(false)}
+                    onPlay={handleNativePlay}
+                    onPause={handleNativePause}
                     onEnded={() => setPlaying(false)}
                     controls={false}
                   />
                 )}
               </div>
 
-              {/* Custom controls */}
               {source.type !== "none" && (
                 <div className="border-t border-white/5 bg-gradient-to-b from-black/0 to-black/60 p-4">
-                  <div className="mb-3 flex items-center gap-3">
-                    <span className="w-12 text-xs tabular-nums text-muted-foreground">{formatTime(progress)}</span>
-                    <Slider
-                      value={[progress]}
-                      max={Math.max(duration, 1)}
-                      step={0.5}
-                      onValueChange={(v) => seekTo(v[0])}
-                      className="flex-1"
-                    />
-                    <span className="w-12 text-right text-xs tabular-nums text-muted-foreground">{formatTime(duration)}</span>
-                  </div>
+                  <SyncTimeline
+                    current={progress}
+                    duration={duration}
+                    playing={playing}
+                    onSeek={seekTo}
+                    className="mb-4"
+                  />
+
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
                       <Button onClick={togglePlay} size="icon" className="h-11 w-11 rounded-full bg-gradient-primary shadow-glow">
@@ -353,7 +503,7 @@ const Room = () => {
                     <div className="flex items-center gap-3 text-xs text-muted-foreground">
                       <span className="hidden items-center gap-1.5 rounded-full bg-emerald-400/10 px-3 py-1 text-emerald-300 sm:inline-flex">
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        Синхронизировано
+                        Синхронизировано · {onlineCount} зрителей
                       </span>
                       <Button variant="ghost" size="icon" className="rounded-full">
                         <Maximize2 className="h-4 w-4" />
@@ -364,12 +514,11 @@ const Room = () => {
               )}
             </div>
 
-            {/* Source picker */}
             <div className="rounded-3xl border border-border/60 bg-gradient-card p-5 shadow-soft">
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h2 className="font-display text-lg font-semibold">Источник видео</h2>
-                  <p className="text-xs text-muted-foreground">Доступно всем зрителям комнаты</p>
+                  <p className="text-xs text-muted-foreground">Откройте комнату в новой вкладке — управление синхронизировано</p>
                 </div>
                 {source.type !== "none" && (
                   <span className="rounded-full bg-primary/15 px-3 py-1 text-xs font-medium text-primary-glow">
@@ -410,30 +559,35 @@ const Room = () => {
 
                 <TabsContent value="file" className="mt-4">
                   <FileDrop onFile={handleFile} />
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Локальные файлы видны только в вашей вкладке (без backend). Для общего просмотра используйте YouTube.
+                  </p>
                 </TabsContent>
               </Tabs>
             </div>
           </div>
 
-          {/* Sidebar: viewers + chat */}
           <aside className="flex flex-col gap-5">
-            {/* Viewers */}
             <div className="rounded-3xl border border-border/60 bg-gradient-card p-5 shadow-soft">
               <div className="mb-4 flex items-center justify-between">
                 <h3 className="font-display text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                   В комнате
                 </h3>
                 <span className="rounded-full bg-emerald-400/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-300">
-                  {viewers.length + 1} онлайн
+                  {onlineCount} онлайн
                 </span>
               </div>
               <div className="flex flex-wrap gap-2">
                 <ViewerChip name={`${me.name} (вы)`} color={me.color} self />
-                {viewers.map((v) => <ViewerChip key={v.name} name={v.name} color={v.color} />)}
+                {peerList.map((v) => <ViewerChip key={v.user + v.avatar} name={v.user} color={v.avatar} />)}
+                {peerList.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Откройте эту страницу в другой вкладке — зритель появится здесь автоматически.
+                  </p>
+                )}
               </div>
             </div>
 
-            {/* Chat */}
             <div className="flex min-h-[480px] flex-1 flex-col overflow-hidden rounded-3xl border border-border/60 bg-gradient-card shadow-soft">
               <div className="flex items-center justify-between border-b border-border/50 px-5 py-4">
                 <div className="flex items-center gap-2">
@@ -475,6 +629,10 @@ const Room = () => {
     </div>
   );
 };
+
+const sysMsg = (text: string): Message => ({
+  id: crypto.randomUUID(), user: "system", avatar: "", text, ts: Date.now(), system: true,
+});
 
 const EmptyPlayer = () => (
   <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-indigo-950 via-background to-black p-8 text-center">

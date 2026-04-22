@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import YouTube, { YouTubePlayer } from "react-youtube";
 import {
   Film, Users, Copy, Check, Send, Youtube as YoutubeIcon, Upload, Link as LinkIcon,
-  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles
+  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { useRoomSync, type SyncEvent, type SyncSource } from "@/hooks/useRoomSync";
+import { SyncTimeline } from "@/components/SyncTimeline";
 
 type Source =
   | { type: "none" }

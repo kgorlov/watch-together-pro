@@ -122,7 +122,8 @@ const Room = () => {
             setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} включил(а) видео с YouTube`)]);
           }
         } else if (e.source.type === "file") {
-          setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} загрузил(а) файл «${e.source.name}» (только в его вкладке)`)]);
+          const fileName = e.source.type === "file" ? e.source.name : "";
+          setMessages((m) => [...m, sysMsg(`${peers[e.from]?.user ?? "Гость"} загрузил(а) файл «${fileName}» (только в его вкладке)`)]);
         }
         break;
       }

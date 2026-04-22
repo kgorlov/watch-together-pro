@@ -3,12 +3,19 @@ import { useParams, useNavigate } from "react-router-dom";
 import YouTube, { YouTubePlayer } from "react-youtube";
 import {
   Film, Users, Copy, Check, Send, Youtube as YoutubeIcon, Upload, Link as LinkIcon,
-  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio
+  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useRoomSync, type SyncEvent, type SyncSource } from "@/hooks/useRoomSync";
@@ -30,6 +37,7 @@ type Message = {
 
 const palette = ["#6366f1", "#a78bfa", "#22d3ee", "#f472b6", "#34d399", "#fbbf24"];
 const MAX_VIDEO_UPLOAD_SIZE = 512 * 1024 * 1024;
+const PROFILE_STORAGE_KEY = "lumen-room-profile";
 
 const extractYoutubeId = (input: string): string | null => {
   const trimmed = input.trim();
@@ -89,14 +97,14 @@ const Room = () => {
   const [copied, setCopied] = useState(false);
   const [ytUrl, setYtUrl] = useState("");
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   // Keep the display identity stable, but make the sync id unique per tab.
-  const [me] = useState(() => {
-    const storageKey = "lumen-room-profile";
+  const [me, setMe] = useState(() => {
     let profile: { name?: string; color?: string } | null = null;
 
     try {
-      const stored = sessionStorage.getItem(storageKey);
+      const stored = sessionStorage.getItem(PROFILE_STORAGE_KEY);
       if (stored) {
         profile = JSON.parse(stored) as { name?: string; color?: string };
       }
@@ -108,13 +116,15 @@ const Room = () => {
     const color = profile?.color || palette[Math.floor(Math.random() * palette.length)];
 
     try {
-      sessionStorage.setItem(storageKey, JSON.stringify({ name, color }));
+      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ name, color }));
     } catch {
       // Ignore storage failures in private/incognito modes.
     }
 
     return { name, color, id: crypto.randomUUID() };
   });
+  const [profileName, setProfileName] = useState(me.name);
+  const [profileColor, setProfileColor] = useState(me.color);
 
   // Live presence of other tabs in this room
   const [peers, setPeers] = useState<Record<string, { user: string; avatar: string; lastSeen: number }>>({});
@@ -531,6 +541,27 @@ const Room = () => {
     setChatInput("");
   };
 
+  const saveProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = profileName.trim().slice(0, 24);
+    if (!name) {
+      toast.error("Введите имя");
+      return;
+    }
+
+    const next = { ...me, name, color: profileColor };
+    setMe(next);
+    try {
+      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ name, color: profileColor }));
+    } catch {
+      // Ignore storage failures in private/incognito modes.
+    }
+
+    send({ kind: "presence", user: next.name, avatar: next.color } as Omit<SyncEvent, "from" | "at">);
+    setProfileOpen(false);
+    toast.success("Имя обновлено");
+  };
+
   const copyCode = async () => {
     await navigator.clipboard.writeText(window.location.href);
     setCopied(true);
@@ -741,6 +772,64 @@ const Room = () => {
                   <Sparkles className="h-4 w-4 text-primary-glow" />
                   <h3 className="font-display text-sm font-semibold uppercase tracking-wider">Чат сеанса</h3>
                 </div>
+                <Dialog open={profileOpen} onOpenChange={(open) => {
+                  setProfileOpen(open);
+                  if (open) {
+                    setProfileName(me.name);
+                    setProfileColor(me.color);
+                  }
+                }}>
+                  <DialogTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-muted-foreground hover:text-foreground">
+                      <Settings className="h-4 w-4" />
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="border-border/70 bg-card sm:max-w-[420px]">
+                    <DialogHeader>
+                      <DialogTitle>Профиль в комнате</DialogTitle>
+                    </DialogHeader>
+                    <form onSubmit={saveProfile} className="space-y-5">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium" htmlFor="profile-name">Имя</label>
+                        <Input
+                          id="profile-name"
+                          value={profileName}
+                          onChange={(e) => setProfileName(e.target.value)}
+                          maxLength={24}
+                          className="h-11 rounded-xl border-border/60 bg-input"
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium">Цвет</div>
+                        <div className="flex flex-wrap gap-2">
+                          {palette.map((color) => (
+                            <button
+                              key={color}
+                              type="button"
+                              onClick={() => setProfileColor(color)}
+                              className={cn(
+                                "h-9 w-9 rounded-full border-2 transition-transform hover:scale-105",
+                                profileColor === color ? "border-foreground" : "border-transparent"
+                              )}
+                              style={{ background: color }}
+                              aria-label={`Выбрать цвет ${color}`}
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2">
+                        <Button type="button" variant="ghost" onClick={() => setProfileOpen(false)}>
+                          Отмена
+                        </Button>
+                        <Button type="submit" className="bg-gradient-primary">
+                          Сохранить
+                        </Button>
+                      </div>
+                    </form>
+                  </DialogContent>
+                </Dialog>
               </div>
 
               <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">

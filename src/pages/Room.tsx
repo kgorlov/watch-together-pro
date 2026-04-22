@@ -90,31 +90,30 @@ const Room = () => {
   const [ytUrl, setYtUrl] = useState("");
   const [uploadingFile, setUploadingFile] = useState(false);
 
-  // user identity (demo) — stable id for sync deduping
+  // Keep the display identity stable, but make the sync id unique per tab.
   const [me] = useState(() => {
-    const storageKey = "lumen-room-identity";
+    const storageKey = "lumen-room-profile";
+    let profile: { name?: string; color?: string } | null = null;
+
     try {
       const stored = sessionStorage.getItem(storageKey);
       if (stored) {
-        const parsed = JSON.parse(stored) as { name?: string; color?: string; id?: string };
-        if (parsed.name && parsed.color && parsed.id) {
-          return { name: parsed.name, color: parsed.color, id: parsed.id };
-        }
+        profile = JSON.parse(stored) as { name?: string; color?: string };
       }
     } catch {
       // Private modes can block storage; fall back to a one-page identity.
     }
 
-    const name = `Гость-${Math.floor(Math.random() * 900 + 100)}`;
-    const color = palette[Math.floor(Math.random() * palette.length)];
-    const id = crypto.randomUUID();
-    const identity = { name, color, id };
+    const name = profile?.name || `Гость-${Math.floor(Math.random() * 900 + 100)}`;
+    const color = profile?.color || palette[Math.floor(Math.random() * palette.length)];
+
     try {
-      sessionStorage.setItem(storageKey, JSON.stringify(identity));
+      sessionStorage.setItem(storageKey, JSON.stringify({ name, color }));
     } catch {
       // Ignore storage failures in private/incognito modes.
     }
-    return identity;
+
+    return { name, color, id: crypto.randomUUID() };
   });
 
   // Live presence of other tabs in this room

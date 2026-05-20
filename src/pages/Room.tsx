@@ -3,7 +3,8 @@ import { useParams, useNavigate } from "react-router-dom";
 import YouTube, { YouTubePlayer } from "react-youtube";
 import {
   Film, Users, Copy, Check, Send, Youtube as YoutubeIcon, Upload, Link as LinkIcon,
-  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings, Crown, Activity, UserX, ShieldCheck
+  Play, Pause, RotateCcw, Volume2, VolumeX, ArrowLeft, Smile, Maximize2, Sparkles, Radio, Settings, Crown, Activity, UserX, ShieldCheck,
+  SkipForward, ListPlus, Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,10 +36,17 @@ type Message = {
   system?: boolean;
 };
 
+type QueuedYoutubeVideo = {
+  id: string;
+  videoId: string;
+  addedAt: number;
+};
+
 const palette = ["#6366f1", "#a78bfa", "#22d3ee", "#f472b6", "#34d399", "#fbbf24"];
 const MAX_VIDEO_UPLOAD_SIZE = 512 * 1024 * 1024;
 const PROFILE_STORAGE_KEY = "lumen-room-profile";
 const OWNER_STORAGE_PREFIX = "lumen-room-owner-";
+const YOUTUBE_QUEUE_STORAGE_PREFIX = "lumen-room-youtube-queue-";
 
 const extractYoutubeId = (input: string): string | null => {
   const trimmed = input.trim();
@@ -109,6 +117,27 @@ const Room = () => {
   const [source, setSource] = useState<Source>({ type: "none" });
   const [copied, setCopied] = useState(false);
   const [ytUrl, setYtUrl] = useState("");
+  const [youtubeQueue, setYoutubeQueue] = useState<QueuedYoutubeVideo[]>(() => {
+    try {
+      const stored = sessionStorage.getItem(`${YOUTUBE_QUEUE_STORAGE_PREFIX}${code}`);
+      const parsed = stored ? JSON.parse(stored) : [];
+      if (!Array.isArray(parsed)) return [];
+
+      return parsed
+        .filter((item): item is QueuedYoutubeVideo =>
+          Boolean(
+            item &&
+              typeof item.id === "string" &&
+              typeof item.videoId === "string" &&
+              /^[\w-]{11}$/.test(item.videoId) &&
+              typeof item.addedAt === "number",
+          ),
+        )
+        .slice(0, 50);
+    } catch {
+      return [];
+    }
+  });
   const [uploadingFile, setUploadingFile] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
@@ -185,6 +214,14 @@ const Room = () => {
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(`${YOUTUBE_QUEUE_STORAGE_PREFIX}${code}`, JSON.stringify(youtubeQueue));
+    } catch {
+      // Ignore storage failures in private/incognito modes.
+    }
+  }, [code, youtubeQueue]);
 
   const addSystemMessage = useCallback((text: string) => {
     setMessages((m) => [...m, sysMsg(text)]);
@@ -590,6 +627,21 @@ const Room = () => {
   const announce = (text: string) =>
     setMessages((m) => [...m, sysMsg(text)]);
 
+  const startYoutubeVideo = (videoId: string, autoPlay: boolean, message: string) => {
+    setSource({ type: "youtube", videoId });
+    markLocalLeader();
+    setProgress(0);
+    setPlaying(autoPlay);
+    announce(message);
+    send({ kind: "source", source: { type: "youtube", videoId } } as Omit<SyncEvent, "from" | "at">);
+
+    if (autoPlay) {
+      pendingRemotePlaybackRef.current = { t: 0, playing: true, until: Date.now() + 12000 };
+      send({ kind: "play", t: 0 } as Omit<SyncEvent, "from" | "at">);
+      window.setTimeout(applyPendingRemotePlayback, 350);
+    }
+  };
+
   const handleSetYoutube = () => {
     if (!requireControl()) return;
 
@@ -598,14 +650,55 @@ const Room = () => {
       toast.error("Не удалось распознать ссылку YouTube");
       return;
     }
-    setSource({ type: "youtube", videoId: vid });
-    markLocalLeader();
+
+    startYoutubeVideo(vid, false, `${me.name} включил(а) видео с YouTube`);
     setYtUrl("");
-    setPlaying(false);
-    setProgress(0);
-    announce(`${me.name} включил(а) видео с YouTube`);
-    send({ kind: "source", source: { type: "youtube", videoId: vid } } as Omit<SyncEvent, "from" | "at">);
     toast.success("Видео загружено и синхронизировано");
+  };
+
+  const addYoutubeToQueue = () => {
+    if (!requireControl()) return;
+
+    const vid = extractYoutubeId(ytUrl);
+    if (!vid) {
+      toast.error("Не удалось распознать ссылку YouTube");
+      return;
+    }
+
+    if (youtubeQueue.some((item) => item.videoId === vid)) {
+      toast.error("Это видео уже есть в очереди");
+      return;
+    }
+
+    setYoutubeQueue((items) => [
+      ...items,
+      { id: crypto.randomUUID(), videoId: vid, addedAt: Date.now() },
+    ]);
+    setYtUrl("");
+    toast.success("Видео добавлено в очередь");
+  };
+
+  const removeYoutubeFromQueue = (id: string) => {
+    if (!requireControl()) return;
+    setYoutubeQueue((items) => items.filter((item) => item.id !== id));
+  };
+
+  const playNextYoutube = () => {
+    if (!requireControl()) return;
+
+    const current = sourceRef.current;
+    const currentIndex = current.type === "youtube"
+      ? youtubeQueue.findIndex((item) => item.videoId === current.videoId)
+      : -1;
+    const nextVideo = currentIndex >= 0 ? youtubeQueue[currentIndex + 1] : youtubeQueue[0];
+
+    if (!nextVideo) {
+      toast.error("В очереди нет следующего видео");
+      return;
+    }
+
+    startYoutubeVideo(nextVideo.videoId, true, `${me.name} включил(а) следующее видео`);
+    toast.success("Следующее видео запущено");
   };
 
   const handleFile = async (file: File) => {
@@ -784,6 +877,10 @@ const Room = () => {
     : syncLeaderId
       ? peers[syncLeaderId]?.user ?? "гость"
       : "не выбран";
+  const currentQueueIndex = source.type === "youtube"
+    ? youtubeQueue.findIndex((item) => item.videoId === source.videoId)
+    : -1;
+  const nextQueuedVideo = currentQueueIndex >= 0 ? youtubeQueue[currentQueueIndex + 1] : youtubeQueue[0];
   const syncLabel = syncStatus
     ? `${Math.abs(syncStatus.lastDrift) > 4 ? "Коррекция" : "Синхронизация"} ±${Math.abs(syncStatus.lastDrift).toFixed(1)} c`
     : "Ожидание синка";
@@ -833,6 +930,7 @@ const Room = () => {
 
                 {source.type === "youtube" && (
                   <YouTube
+                    key={source.videoId}
                     videoId={source.videoId}
                     className="h-full w-full"
                     iframeClassName="h-full w-full"
@@ -882,6 +980,9 @@ const Room = () => {
                       </Button>
                       <Button onClick={restart} variant="ghost" size="icon" className="rounded-full">
                         <RotateCcw className="h-4 w-4" />
+                      </Button>
+                      <Button onClick={playNextYoutube} variant="ghost" size="icon" className="rounded-full" aria-label="Следующее видео">
+                        <SkipForward className="h-4 w-4" />
                       </Button>
                       <div className="ml-2 flex items-center gap-2">
                         <Button onClick={toggleMute} variant="ghost" size="icon" className="rounded-full">
@@ -940,23 +1041,87 @@ const Room = () => {
                 </TabsList>
 
                 <TabsContent value="youtube" className="mt-4">
-                  <form
-                    onSubmit={(e) => { e.preventDefault(); handleSetYoutube(); }}
-                    className="flex flex-col gap-2 rounded-xl sm:h-12 sm:flex-row sm:items-stretch sm:overflow-hidden sm:bg-input"
-                  >
-                    <div className="hidden items-center pl-4 text-muted-foreground sm:flex">
-                      <LinkIcon className="h-4 w-4" />
-                    </div>
-                    <Input
-                      value={ytUrl}
-                      onChange={(e) => setYtUrl(e.target.value)}
-                      placeholder="Вставьте ссылку YouTube или ID видео"
-                      className="h-12 flex-1 border-border/60 bg-input sm:h-full sm:border-0 sm:bg-transparent sm:focus-visible:ring-0"
-                    />
-                    <Button type="submit" className="h-12 rounded-xl bg-gradient-primary px-5 sm:h-full sm:rounded-none">
-                      Загрузить
+                  <div className="flex flex-col gap-2 lg:flex-row">
+                    <form
+                      onSubmit={(e) => { e.preventDefault(); handleSetYoutube(); }}
+                      className="flex min-w-0 flex-1 flex-col gap-2 rounded-xl sm:h-12 sm:flex-row sm:items-stretch sm:overflow-hidden sm:bg-input"
+                    >
+                      <div className="hidden items-center pl-4 text-muted-foreground sm:flex">
+                        <LinkIcon className="h-4 w-4" />
+                      </div>
+                      <Input
+                        value={ytUrl}
+                        onChange={(e) => setYtUrl(e.target.value)}
+                        placeholder="Вставьте ссылку YouTube или ID видео"
+                        className="h-12 flex-1 border-border/60 bg-input sm:h-full sm:border-0 sm:bg-transparent sm:focus-visible:ring-0"
+                      />
+                      <Button type="submit" className="h-12 rounded-xl bg-gradient-primary px-5 sm:h-full sm:rounded-none">
+                        Загрузить
+                      </Button>
+                    </form>
+                    <Button type="button" onClick={addYoutubeToQueue} variant="secondary" className="h-12 rounded-xl px-4">
+                      <ListPlus className="mr-2 h-4 w-4" />
+                      В очередь
                     </Button>
-                  </form>
+                  </div>
+
+                  {youtubeQueue.length > 0 && (
+                    <div className="mt-4 rounded-xl border border-border/60 bg-muted/25 p-3">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <div className="font-display text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                            Очередь YouTube
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {nextQueuedVideo ? `Следующее: ${nextQueuedVideo.videoId}` : "Следующих видео нет"}
+                          </div>
+                        </div>
+                        <Button type="button" onClick={playNextYoutube} size="sm" className="rounded-xl bg-gradient-primary">
+                          <SkipForward className="mr-2 h-4 w-4" />
+                          Следующее
+                        </Button>
+                      </div>
+
+                      <div className="mt-3 max-h-56 space-y-2 overflow-y-auto pr-1">
+                        {youtubeQueue.map((item, index) => {
+                          const current = source.type === "youtube" && source.videoId === item.videoId;
+
+                          return (
+                            <div
+                              key={item.id}
+                              className={cn(
+                                "flex items-center gap-3 rounded-xl border p-2",
+                                current ? "border-primary/50 bg-primary/10" : "border-border/50 bg-background/30",
+                              )}
+                            >
+                              <img
+                                src={`https://img.youtube.com/vi/${item.videoId}/mqdefault.jpg`}
+                                alt=""
+                                className="h-12 w-20 shrink-0 rounded-lg object-cover"
+                                loading="lazy"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm font-medium">
+                                  {current ? "Сейчас играет" : `Видео ${index + 1}`}
+                                </div>
+                                <div className="font-mono text-xs text-muted-foreground">{item.videoId}</div>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => removeYoutubeFromQueue(item.id)}
+                                className="h-9 w-9 shrink-0 rounded-full text-muted-foreground hover:text-destructive"
+                                aria-label="Удалить из очереди"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </TabsContent>
 
                 <TabsContent value="file" className="mt-4">

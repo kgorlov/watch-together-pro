@@ -1011,7 +1011,7 @@ const Room = () => {
                     </span>
                     <span className="font-display text-lg font-semibold">Запустить с текущего момента</span>
                     <span className="max-w-sm text-sm text-white/70">
-                      Телефон заблокировал автозапуск YouTube. После нажатия видео продолжится синхронно.
+                      Браузер заблокировал автозапуск YouTube. После нажатия видео продолжится синхронно.
                     </span>
                   </button>
                 )}

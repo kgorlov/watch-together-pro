@@ -38,6 +38,7 @@ type Message = {
 const palette = ["#6366f1", "#a78bfa", "#22d3ee", "#f472b6", "#34d399", "#fbbf24"];
 const MAX_VIDEO_UPLOAD_SIZE = 512 * 1024 * 1024;
 const PROFILE_STORAGE_KEY = "lumen-room-profile";
+const OWNER_STORAGE_PREFIX = "lumen-room-owner-";
 
 const extractYoutubeId = (input: string): string | null => {
   const trimmed = input.trim();
@@ -111,32 +112,40 @@ const Room = () => {
   const [uploadingFile, setUploadingFile] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
-  // Keep the display identity stable, but make the sync id unique per tab.
+  // Keep the display identity and sync id stable for this browser session.
   const [me, setMe] = useState(() => {
-    let profile: { name?: string; color?: string } | null = null;
+    let profile: { id?: string; name?: string; color?: string } | null = null;
 
     try {
       const stored = sessionStorage.getItem(PROFILE_STORAGE_KEY);
       if (stored) {
-        profile = JSON.parse(stored) as { name?: string; color?: string };
+        profile = JSON.parse(stored) as { id?: string; name?: string; color?: string };
       }
     } catch {
       // Private modes can block storage; fall back to a one-page identity.
     }
 
     const name = profile?.name || `Гость-${Math.floor(Math.random() * 900 + 100)}`;
+    const id = profile?.id || crypto.randomUUID();
     const color = profile?.color || palette[Math.floor(Math.random() * palette.length)];
 
     try {
-      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ name, color }));
+      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ id, name, color }));
     } catch {
       // Ignore storage failures in private/incognito modes.
     }
 
-    return { name, color, id: crypto.randomUUID() };
+    return { name, color, id };
   });
   const [profileName, setProfileName] = useState(me.name);
   const [profileColor, setProfileColor] = useState(me.color);
+  const [isRoomOwner] = useState(() => {
+    try {
+      return sessionStorage.getItem(`${OWNER_STORAGE_PREFIX}${code}`) === "1";
+    } catch {
+      return false;
+    }
+  });
 
   // Live presence of other tabs in this room
   const [peers, setPeers] = useState<Record<string, { user: string; avatar: string; lastSeen: number }>>({});
@@ -149,7 +158,7 @@ const Room = () => {
     { id: "s1", user: "system", avatar: "", text: `Комната ${code} создана. Откройте эту же ссылку в новой вкладке — синхронизация заработает автоматически ✨`, ts: Date.now(), system: true },
   ]);
   const [chatInput, setChatInput] = useState("");
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
 
   // playback
   const ytPlayerRef = useRef<YouTubePlayer | null>(null);
@@ -168,9 +177,13 @@ const Room = () => {
   sourceRef.current = source;
   const playingRef = useRef(playing);
   playingRef.current = playing;
+  const isAdmin = adminId === me.id;
+  const canControlPlayback = !adminId || isAdmin;
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
   const addSystemMessage = useCallback((text: string) => {
@@ -190,6 +203,12 @@ const Room = () => {
   const markLocalLeader = useCallback(() => {
     markSyncLeader(me.id);
   }, [markSyncLeader, me.id]);
+
+  const requireControl = useCallback(() => {
+    if (canControlPlayback) return true;
+    toast.error("Управлять общим просмотром может только организатор комнаты");
+    return false;
+  }, [canControlPlayback]);
 
   const updateSyncStatus = useCallback((remoteTime: number) => {
     setSyncStatus({
@@ -337,6 +356,10 @@ const Room = () => {
   useEffect(() => {
     sendRef.current = {
       snapshot: () => {
+        if (!canControlPlayback) {
+          return;
+        }
+
         if (syncLeaderRef.current && syncLeaderRef.current !== me.id) {
           return;
         }
@@ -354,11 +377,11 @@ const Room = () => {
         } as Omit<SyncEvent, "from" | "at">);
       },
     };
-  }, [send]);
+  }, [canControlPlayback, me.id, send]);
 
   // Hello on mount, leave on unmount
   useEffect(() => {
-    send({ kind: "hello", user: me.name, avatar: me.color } as Omit<SyncEvent, "from" | "at">);
+    send({ kind: "hello", user: me.name, avatar: me.color, owner: isRoomOwner } as Omit<SyncEvent, "from" | "at">);
     send({ kind: "state-request" } as Omit<SyncEvent, "from" | "at">);
     const presenceId = window.setInterval(() => {
       send({ kind: "presence", user: me.name, avatar: me.color } as Omit<SyncEvent, "from" | "at">);
@@ -373,7 +396,7 @@ const Room = () => {
     return () => {
       window.clearInterval(presenceId);
     };
-  }, [send, me.name, me.color]);
+  }, [send, me.name, me.color, isRoomOwner]);
 
   // file <video> progress tracker
   useEffect(() => {
@@ -408,12 +431,13 @@ const Room = () => {
   useEffect(() => {
     if (source.type === "none") return;
     const id = window.setInterval(() => {
+      if (!canControlPlayback) return;
       if (!playingRef.current) return;
       if (syncLeaderRef.current && syncLeaderRef.current !== me.id) return;
       send({ kind: "tick", t: currentTimeInternal(), playing: true } as Omit<SyncEvent, "from" | "at">);
     }, 5000);
     return () => window.clearInterval(id);
-  }, [source, send, me.id]);
+  }, [source, send, me.id, canControlPlayback]);
 
   // ---- Internal player helpers (no broadcast) ----
   const currentTimeInternal = (): number => {
@@ -567,6 +591,8 @@ const Room = () => {
     setMessages((m) => [...m, sysMsg(text)]);
 
   const handleSetYoutube = () => {
+    if (!requireControl()) return;
+
     const vid = extractYoutubeId(ytUrl);
     if (!vid) {
       toast.error("Не удалось распознать ссылку YouTube");
@@ -583,6 +609,8 @@ const Room = () => {
   };
 
   const handleFile = async (file: File) => {
+    if (!requireControl()) return;
+
     if (!file.type.startsWith("video/")) {
       toast.error("Это не видеофайл");
       return;
@@ -634,6 +662,12 @@ const Room = () => {
 
   const togglePlay = () => {
     const next = !playing;
+    if (!canControlPlayback) {
+      if (next) playInternal(); else pauseInternal();
+      setPlaying(next);
+      return;
+    }
+
     markLocalLeader();
     if (next) playInternal(); else pauseInternal();
     setPlaying(next);
@@ -645,6 +679,8 @@ const Room = () => {
   };
 
   const seekTo = (val: number) => {
+    if (!requireControl()) return;
+
     markLocalLeader();
     seekInternal(val);
     setProgress(val);
@@ -678,12 +714,14 @@ const Room = () => {
   const handleNativePlay = () => {
     setPlaying(true);
     if (applyingRemoteRef.current) return;
+    if (!canControlPlayback) return;
     markLocalLeader();
     send({ kind: "play", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
   };
   const handleNativePause = () => {
     setPlaying(false);
     if (applyingRemoteRef.current) return;
+    if (!canControlPlayback) return;
     markLocalLeader();
     send({ kind: "pause", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
   };
@@ -714,7 +752,7 @@ const Room = () => {
     const next = { ...me, name, color: profileColor };
     setMe(next);
     try {
-      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ name, color: profileColor }));
+      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ id: next.id, name, color: profileColor }));
     } catch {
       // Ignore storage failures in private/incognito modes.
     }
@@ -749,8 +787,6 @@ const Room = () => {
   const syncLabel = syncStatus
     ? `${Math.abs(syncStatus.lastDrift) > 4 ? "Коррекция" : "Синхронизация"} ±${Math.abs(syncStatus.lastDrift).toFixed(1)} c`
     : "Ожидание синка";
-  const isAdmin = adminId === me.id;
-
   return (
     <div className="relative min-h-screen bg-background text-foreground">
       <div className="pointer-events-none absolute inset-0 bg-hero opacity-60" aria-hidden />
@@ -964,7 +1000,7 @@ const Room = () => {
               </div>
             </div>
 
-            <div className="flex max-h-[70vh] min-h-[360px] flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 bg-gradient-card shadow-soft sm:min-h-[480px] sm:rounded-3xl lg:max-h-none">
+            <div className="flex h-[420px] min-h-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-gradient-card shadow-soft sm:h-[520px] sm:rounded-3xl lg:h-[calc(100vh-9rem)] lg:max-h-[760px]">
               <div className="flex items-center justify-between border-b border-border/50 px-5 py-4">
                 <div className="flex items-center gap-2">
                   <Sparkles className="h-4 w-4 text-primary-glow" />
@@ -1030,11 +1066,10 @@ const Room = () => {
                 </Dialog>
               </div>
 
-              <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+              <div ref={chatScrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
                 {messages.map((m) => (
                   <ChatBubble key={m.id} m={m} isMe={m.user === me.name} />
                 ))}
-                <div ref={chatEndRef} />
               </div>
 
               <form onSubmit={sendMessage} className="flex items-center gap-2 border-t border-border/50 p-3">

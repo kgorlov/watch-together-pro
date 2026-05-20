@@ -23,7 +23,7 @@ export type SyncEvent =
   | { kind: "kick"; target: string; at: number; from: string }
   | { kind: "kicked"; by: string; at: number; from: string }
   | { kind: "leave"; from: string; at: number }
-  | { kind: "hello"; from: string; user: string; avatar: string; at: number }
+  | { kind: "hello"; from: string; user: string; avatar: string; owner?: boolean; at: number }
   | { kind: "state-request"; from: string; at: number }
   | { kind: "state-snapshot"; source: SyncSource; t: number; playing: boolean; at: number; from: string };
 

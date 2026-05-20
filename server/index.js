@@ -158,6 +158,8 @@ wss.on("connection", (socket, request) => {
     } else if (event.kind === "state-request") {
       sendKnownRoomState(socket, room, userId);
       return;
+    } else if (isControlEvent(event) && room.adminId && room.adminId !== userId) {
+      return;
     } else {
       rememberState(room, event);
     }
@@ -213,7 +215,8 @@ function rememberUser(room, userId, event) {
     leaveTimer: null,
   });
 
-  if (!room.adminId) {
+  const claimsOwner = event.kind === "hello" && event.owner === true;
+  if (!room.adminId || (claimsOwner && room.adminId !== userId)) {
     room.adminId = userId;
     broadcastRoomMeta(room);
   }
@@ -317,6 +320,17 @@ function rememberState(room, event) {
       at: event.at,
     };
   }
+}
+
+function isControlEvent(event) {
+  return (
+    event.kind === "source" ||
+    event.kind === "play" ||
+    event.kind === "pause" ||
+    event.kind === "seek" ||
+    event.kind === "tick" ||
+    event.kind === "state-snapshot"
+  );
 }
 
 function estimateStateTime(state) {

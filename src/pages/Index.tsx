@@ -8,6 +8,8 @@ import heroImg from "@/assets/hero-cinema.jpg";
 const generateRoomCode = () =>
   Math.random().toString(36).slice(2, 8).toUpperCase();
 
+const OWNER_STORAGE_PREFIX = "lumen-room-owner-";
+
 const Index = () => {
   const navigate = useNavigate();
   const [joinCode, setJoinCode] = useState("");
@@ -17,6 +19,11 @@ const Index = () => {
 
   const createRoom = () => {
     const code = generateRoomCode();
+    try {
+      sessionStorage.setItem(`${OWNER_STORAGE_PREFIX}${code}`, "1");
+    } catch {
+      // Ignore storage failures in private/incognito modes.
+    }
     navigate(`/room/${code}`);
   };
 

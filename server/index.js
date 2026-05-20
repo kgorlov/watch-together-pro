@@ -122,6 +122,9 @@ wss.on("connection", (socket, request) => {
     } else if (event.kind === "leave") {
       scheduleUserLeave(roomCode, room, userId);
       return;
+    } else if (event.kind === "state-request") {
+      sendKnownRoomState(socket, room, userId);
+      return;
     } else {
       rememberState(room, event);
     }

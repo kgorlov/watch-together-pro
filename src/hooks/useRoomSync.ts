@@ -49,14 +49,29 @@ export const useRoomSync = (roomCode: string, selfId: string, onEvent: (e: SyncE
       handlerRef.current(event);
     };
 
+    const sendLocal = (payload: SyncEvent) => {
+      if (bc) {
+        bc.postMessage(payload);
+        return;
+      }
+
+      try {
+        localStorage.setItem(channelName, JSON.stringify(payload));
+      } catch {
+        // Ignore storage failures in private/incognito modes.
+      }
+    };
+
     const syncServerUrl = getSyncServerUrl(roomCode, selfId);
     const connectWs = () => {
       if (!syncServerUrl) return;
 
       ws = new WebSocket(syncServerUrl);
       wsRef.current = ws;
+      let opened = false;
 
       ws.onopen = () => {
+        opened = true;
         const queued = pendingRef.current.splice(0);
         for (const event of queued) {
           ws?.send(JSON.stringify(event));
@@ -74,6 +89,13 @@ export const useRoomSync = (roomCode: string, selfId: string, onEvent: (e: SyncE
       ws.onclose = () => {
         if (wsRef.current === ws) {
           wsRef.current = null;
+        }
+
+        if (!opened) {
+          const queued = pendingRef.current.splice(0);
+          for (const event of queued) {
+            sendLocal(event);
+          }
         }
 
         if (!closedByHook) {
@@ -168,10 +190,9 @@ function getSameOriginSyncBaseUrl() {
   }
 
   const { hostname, origin, protocol } = window.location;
-  const isLocalVite = hostname === "localhost" || hostname === "127.0.0.1";
   const isGitHubPages = hostname.endsWith("github.io");
 
-  if (!origin || isLocalVite || isGitHubPages || protocol === "file:") {
+  if (!origin || isGitHubPages || protocol === "file:") {
     return "";
   }
 

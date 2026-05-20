@@ -52,6 +52,7 @@ app.get("/api/rooms/:code/state", (req, res) => {
       from: "server",
       at: Date.now(),
       adminId: "",
+      ownerId: "",
       users: [],
     });
     return;
@@ -64,6 +65,7 @@ app.get("/api/rooms/:code/state", (req, res) => {
     from: room.state.from || "server",
     at: Date.now(),
     adminId: room.adminId,
+    ownerId: room.ownerId,
     users: Array.from(room.users, ([id, user]) => ({
       id,
       user: user.user,
@@ -157,6 +159,7 @@ wss.on("connection", (socket, request) => {
       return;
     } else if (event.kind === "state-request") {
       sendKnownRoomState(socket, room, userId);
+      broadcast(room, client, event);
       return;
     } else if (isControlEvent(event) && room.adminId && room.adminId !== userId) {
       return;
@@ -190,6 +193,7 @@ function getRoom(roomCode) {
     clients: new Set(),
     users: new Map(),
     adminId: "",
+    ownerId: "",
     state: {
       source: { type: "none" },
       t: 0,
@@ -216,7 +220,22 @@ function rememberUser(room, userId, event) {
   });
 
   const claimsOwner = event.kind === "hello" && event.owner === true;
-  if (!room.adminId || (claimsOwner && room.adminId !== userId)) {
+  if (claimsOwner) {
+    room.ownerId = userId;
+  }
+
+  if (!room.adminId || room.adminId === room.ownerId || claimsOwner) {
+    const nextAdminId = room.ownerId || userId;
+    if (room.adminId === nextAdminId) {
+      return;
+    }
+
+    room.adminId = nextAdminId;
+    broadcastRoomMeta(room);
+    return;
+  }
+
+  if (!room.ownerId && !room.adminId) {
     room.adminId = userId;
     broadcastRoomMeta(room);
   }
@@ -356,7 +375,13 @@ function scheduleUserLeave(roomCode, room, userId) {
 
     room.users.delete(userId);
     if (room.adminId === userId) {
-      room.adminId = room.users.keys().next().value || "";
+      if (room.ownerId === userId) {
+        room.adminId = userId;
+      } else if (room.ownerId) {
+        room.adminId = room.ownerId;
+      } else {
+        room.adminId = room.users.keys().next().value || "";
+      }
       broadcastRoomMeta(room);
     }
     broadcast(room, null, { kind: "leave", from: userId, at: Date.now() });

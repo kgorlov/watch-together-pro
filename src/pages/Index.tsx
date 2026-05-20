@@ -20,6 +20,7 @@ const Index = () => {
   const createRoom = () => {
     const code = generateRoomCode();
     try {
+      localStorage.setItem(`${OWNER_STORAGE_PREFIX}${code}`, "1");
       sessionStorage.setItem(`${OWNER_STORAGE_PREFIX}${code}`, "1");
     } catch {
       // Ignore storage failures in private/incognito modes.

@@ -111,6 +111,46 @@ const resolveMediaUrl = (url: string) => {
   return new URL(url, baseUrl).toString();
 };
 
+const getBrowserStorages = () => {
+  if (typeof window === "undefined") return [];
+
+  const storages: Storage[] = [];
+  for (const key of ["localStorage", "sessionStorage"] as const) {
+    try {
+      storages.push(window[key]);
+    } catch {
+      // Ignore storage failures in private/incognito modes.
+    }
+  }
+
+  return storages;
+};
+
+const readStoredProfile = () => {
+  for (const storage of getBrowserStorages()) {
+    try {
+      const stored = storage.getItem(PROFILE_STORAGE_KEY);
+      if (stored) {
+        return JSON.parse(stored) as { id?: string; name?: string; color?: string };
+      }
+    } catch {
+      // Ignore storage failures in private/incognito modes.
+    }
+  }
+
+  return null;
+};
+
+const writeStoredProfile = (profile: { id: string; name: string; color: string }) => {
+  for (const storage of getBrowserStorages()) {
+    try {
+      storage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
+    } catch {
+      // Ignore storage failures in private/incognito modes.
+    }
+  }
+};
+
 const Room = () => {
   const { code = "ROOM" } = useParams();
   const navigate = useNavigate();
@@ -141,28 +181,15 @@ const Room = () => {
   const [uploadingFile, setUploadingFile] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
-  // Keep the display identity and sync id stable for this browser session.
+  // Keep the display identity and sync id stable for this browser.
   const [me, setMe] = useState(() => {
-    let profile: { id?: string; name?: string; color?: string } | null = null;
-
-    try {
-      const stored = sessionStorage.getItem(PROFILE_STORAGE_KEY);
-      if (stored) {
-        profile = JSON.parse(stored) as { id?: string; name?: string; color?: string };
-      }
-    } catch {
-      // Private modes can block storage; fall back to a one-page identity.
-    }
+    const profile = readStoredProfile();
 
     const name = profile?.name || `Гость-${Math.floor(Math.random() * 900 + 100)}`;
     const id = profile?.id || crypto.randomUUID();
     const color = profile?.color || palette[Math.floor(Math.random() * palette.length)];
 
-    try {
-      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ id, name, color }));
-    } catch {
-      // Ignore storage failures in private/incognito modes.
-    }
+    writeStoredProfile({ id, name, color });
 
     return { name, color, id };
   });
@@ -170,7 +197,13 @@ const Room = () => {
   const [profileColor, setProfileColor] = useState(me.color);
   const [isRoomOwner] = useState(() => {
     try {
-      return sessionStorage.getItem(`${OWNER_STORAGE_PREFIX}${code}`) === "1";
+      const ownerKey = `${OWNER_STORAGE_PREFIX}${code}`;
+      const ownsRoom = localStorage.getItem(ownerKey) === "1" || sessionStorage.getItem(ownerKey) === "1";
+      if (ownsRoom) {
+        localStorage.setItem(ownerKey, "1");
+        sessionStorage.setItem(ownerKey, "1");
+      }
+      return ownsRoom;
     } catch {
       return false;
     }
@@ -399,7 +432,7 @@ const Room = () => {
           return;
         }
 
-        if (syncLeaderRef.current && syncLeaderRef.current !== me.id) {
+        if (!isAdmin && syncLeaderRef.current && syncLeaderRef.current !== me.id) {
           return;
         }
 
@@ -416,7 +449,7 @@ const Room = () => {
         } as Omit<SyncEvent, "from" | "at">);
       },
     };
-  }, [canControlPlayback, me.id, send]);
+  }, [canControlPlayback, isAdmin, me.id, send]);
 
   // Hello on mount, leave on unmount
   useEffect(() => {
@@ -882,11 +915,7 @@ const Room = () => {
 
     const next = { ...me, name, color: profileColor };
     setMe(next);
-    try {
-      sessionStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ id: next.id, name, color: profileColor }));
-    } catch {
-      // Ignore storage failures in private/incognito modes.
-    }
+    writeStoredProfile({ id: next.id, name, color: profileColor });
 
     announce(`Имя изменено на ${next.name}`);
     send({ kind: "presence", user: next.name, avatar: next.color } as Omit<SyncEvent, "from" | "at">);

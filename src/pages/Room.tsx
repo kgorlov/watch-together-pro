@@ -197,6 +197,7 @@ const Room = () => {
   const [duration, setDuration] = useState(0);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(80);
+  const [playUnlockPrompt, setPlayUnlockPrompt] = useState<{ t: number; requestedAt: number } | null>(null);
 
   // Suppress local event re-broadcast when applying remote events
   const applyingRemoteRef = useRef(false);
@@ -299,6 +300,7 @@ const Room = () => {
       }
       case "source": {
         markSyncLeader(e.from);
+        setPlayUnlockPrompt(null);
         const cur = sourceRef.current;
         if (e.source.type === "youtube") {
           if (cur.type !== "youtube" || cur.videoId !== e.source.videoId) {
@@ -503,6 +505,9 @@ const Room = () => {
   };
 
   const applyRemotePlayback = (t: number, shouldPlay: boolean) => {
+    if (!shouldPlay) {
+      setPlayUnlockPrompt(null);
+    }
     pendingRemotePlaybackRef.current = { t, playing: shouldPlay, until: Date.now() + 12000 };
     applyPendingRemotePlayback();
   };
@@ -532,6 +537,25 @@ const Room = () => {
     seekInternal(pending.t);
     if (pending.playing) playInternal();
     else pauseInternal();
+
+    if (pending.playing && sourceRef.current.type === "youtube") {
+      const expectedTime = pending.t;
+      window.setTimeout(() => {
+        if (sourceRef.current.type !== "youtube" || !ytPlayerRef.current) return;
+
+        try {
+          const state = ytPlayerRef.current.getPlayerState() as number;
+          if (state !== 1) {
+            setPlayUnlockPrompt({ t: expectedTime, requestedAt: Date.now() });
+          }
+        } catch {
+          setPlayUnlockPrompt({ t: expectedTime, requestedAt: Date.now() });
+        }
+      }, 900);
+    } else {
+      setPlayUnlockPrompt(null);
+    }
+
     window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
     pendingRemotePlaybackRef.current = null;
   };
@@ -628,6 +652,7 @@ const Room = () => {
     setMessages((m) => [...m, sysMsg(text)]);
 
   const startYoutubeVideo = (videoId: string, autoPlay: boolean, message: string) => {
+    setPlayUnlockPrompt(null);
     setSource({ type: "youtube", videoId });
     markLocalLeader();
     setProgress(0);
@@ -783,6 +808,17 @@ const Room = () => {
 
   const restart = () => seekTo(0);
 
+  const unlockYoutubePlayback = () => {
+    const t = playUnlockPrompt?.t ?? progress;
+    applyingRemoteRef.current = true;
+    seekInternal(t);
+    playInternal();
+    setProgress(t);
+    setPlaying(true);
+    setPlayUnlockPrompt(null);
+    window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+  };
+
   const setVol = (v: number) => {
     setVolume(v);
     if (source.type === "youtube" && ytPlayerRef.current) ytPlayerRef.current.setVolume(v);
@@ -806,6 +842,7 @@ const Room = () => {
   // Native player event guards: only broadcast if NOT applying remote
   const handleNativePlay = () => {
     setPlaying(true);
+    setPlayUnlockPrompt(null);
     if (applyingRemoteRef.current) return;
     if (!canControlPlayback) return;
     markLocalLeader();
@@ -814,6 +851,7 @@ const Room = () => {
   const handleNativePause = () => {
     setPlaying(false);
     if (applyingRemoteRef.current) return;
+    setPlayUnlockPrompt(null);
     if (!canControlPlayback) return;
     markLocalLeader();
     send({ kind: "pause", t: currentTimeInternal() } as Omit<SyncEvent, "from" | "at">);
@@ -925,7 +963,7 @@ const Room = () => {
         <div className="grid gap-4 sm:gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="space-y-5">
             <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-black shadow-elevated sm:rounded-3xl">
-              <div className="aspect-video w-full">
+              <div className="relative aspect-video w-full">
                 {source.type === "none" && <EmptyPlayer />}
 
                 {source.type === "youtube" && (
@@ -960,6 +998,22 @@ const Room = () => {
                     onEnded={() => setPlaying(false)}
                     controls={false}
                   />
+                )}
+
+                {source.type === "youtube" && playUnlockPrompt && (
+                  <button
+                    type="button"
+                    onClick={unlockYoutubePlayback}
+                    className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/75 p-6 text-center text-white backdrop-blur-sm transition-colors hover:bg-black/70"
+                  >
+                    <span className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-primary shadow-glow">
+                      <Play className="ml-0.5 h-6 w-6" />
+                    </span>
+                    <span className="font-display text-lg font-semibold">Запустить с текущего момента</span>
+                    <span className="max-w-sm text-sm text-white/70">
+                      Телефон заблокировал автозапуск YouTube. После нажатия видео продолжится синхронно.
+                    </span>
+                  </button>
                 )}
               </div>
 

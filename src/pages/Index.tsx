@@ -17,6 +17,10 @@ const Index = () => {
 
   useEffect(() => setMounted(true), []);
 
+  const scrollToSection = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const createRoom = () => {
     const code = generateRoomCode();
     try {
@@ -58,9 +62,15 @@ const Index = () => {
           <span className="font-display text-xl font-bold tracking-tight">Люмен</span>
         </div>
         <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
-          <a href="#features" className="transition-colors hover:text-foreground">Возможности</a>
-          <a href="#how" className="transition-colors hover:text-foreground">Как это работает</a>
-          <a href="#faq" className="transition-colors hover:text-foreground">Вопросы</a>
+          <button type="button" onClick={() => scrollToSection("features")} className="bg-transparent p-0 transition-colors hover:text-foreground">
+            Возможности
+          </button>
+          <button type="button" onClick={() => scrollToSection("how")} className="bg-transparent p-0 transition-colors hover:text-foreground">
+            Как это работает
+          </button>
+          <button type="button" onClick={() => scrollToSection("faq")} className="bg-transparent p-0 transition-colors hover:text-foreground">
+            Вопросы
+          </button>
         </nav>
         <Button variant="ghost" onClick={createRoom} className="hidden md:inline-flex">
           Создать комнату

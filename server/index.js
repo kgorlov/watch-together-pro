@@ -40,6 +40,39 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+app.get("/api/rooms/:code/state", (req, res) => {
+  const roomCode = normalizeRoomCode(req.params.code);
+  const room = roomCode ? rooms.get(roomCode) : null;
+
+  if (!room) {
+    res.json({
+      source: { type: "none" },
+      t: 0,
+      playing: false,
+      from: "server",
+      at: Date.now(),
+      adminId: "",
+      users: [],
+    });
+    return;
+  }
+
+  res.json({
+    source: room.state.source,
+    t: estimateStateTime(room.state),
+    playing: room.state.playing,
+    from: room.state.from || "server",
+    at: Date.now(),
+    adminId: room.adminId,
+    users: Array.from(room.users, ([id, user]) => ({
+      id,
+      user: user.user,
+      avatar: user.avatar,
+      lastSeen: user.lastSeen,
+    })),
+  });
+});
+
 app.post("/api/upload", (req, res, next) => {
   upload.single("video")(req, res, (error) => {
     if (error) {

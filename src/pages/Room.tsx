@@ -86,6 +86,12 @@ const getUploadUrl = () => {
   return new URL("/api/upload", baseUrl).toString();
 };
 
+const getRoomStateUrl = (code: string) => {
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) return "";
+  return new URL(`/api/rooms/${encodeURIComponent(code)}/state`, baseUrl).toString();
+};
+
 const resolveMediaUrl = (url: string) => {
   if (/^https?:\/\//i.test(url)) {
     return url;
@@ -468,6 +474,93 @@ const Room = () => {
     window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
     pendingRemotePlaybackRef.current = null;
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    let loadedOnce = false;
+
+    const loadKnownRoomState = async () => {
+      const stateUrl = getRoomStateUrl(code);
+      if (!stateUrl) return;
+
+      try {
+        const response = await fetch(stateUrl, { cache: "no-store" });
+        if (!response.ok) return;
+
+        const state = await response.json() as {
+          source?: SyncSource;
+          t?: number;
+          playing?: boolean;
+          from?: string;
+          adminId?: string;
+          users?: Array<{ id: string; user: string; avatar: string; lastSeen: number }>;
+        };
+
+        if (cancelled) return;
+
+        if (state.adminId) {
+          setAdminId(state.adminId);
+        }
+
+        if (Array.isArray(state.users)) {
+          setPeers((p) => {
+            const next = { ...p };
+            for (const user of state.users ?? []) {
+              if (!user.id || user.id === me.id) continue;
+              next[user.id] = {
+                user: user.user,
+                avatar: user.avatar,
+                lastSeen: user.lastSeen,
+              };
+            }
+            return next;
+          });
+        }
+
+        if (!state.source || state.source.type === "none") return;
+
+        const remoteTime = typeof state.t === "number" ? state.t : 0;
+        const remotePlaying = Boolean(state.playing);
+        const remoteLeader = typeof state.from === "string" && state.from ? state.from : "server";
+
+        markSyncLeader(remoteLeader);
+        updateSyncStatus(remoteTime);
+        applyingRemoteRef.current = true;
+
+        const cur = sourceRef.current;
+        if (state.source.type === "youtube") {
+          if (cur.type !== "youtube" || cur.videoId !== state.source.videoId) {
+            setSource({ type: "youtube", videoId: state.source.videoId });
+          }
+          applyRemotePlayback(remoteTime, remotePlaying);
+        } else if (state.source.type === "file") {
+          const url = resolveMediaUrl(state.source.url);
+          if (cur.type !== "file" || cur.url !== url) {
+            setSource({ type: "file", url, name: state.source.name });
+          }
+          applyRemotePlayback(remoteTime, remotePlaying);
+        }
+
+        window.setTimeout(() => { applyingRemoteRef.current = false; }, 1200);
+      } catch {
+        // WebSocket remains the primary path; HTTP state fetch is a resilience fallback.
+      }
+    };
+
+    loadKnownRoomState().then(() => {
+      loadedOnce = true;
+    });
+
+    const retryId = window.setInterval(() => {
+      if (loadedOnce && sourceRef.current.type !== "none") return;
+      void loadKnownRoomState();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(retryId);
+    };
+  }, [code, markSyncLeader, me.id, updateSyncStatus]);
 
   // ---- User actions (broadcast) ----
   const announce = (text: string) =>
